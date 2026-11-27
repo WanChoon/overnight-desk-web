@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black"/>
+  <meta name="apple-mobile-web-app-title" content="Desk"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <meta name="theme-color" content="#000000"/>
+  <link rel="apple-touch-icon" href="icons/icon-180.png"/>
+  <link rel="manifest" href="manifest.json"/>
+  <link rel="stylesheet" href="app.css"/>
+  <title>Grok Bot · Overnight Desk</title>
+</head>
+<body>
+  <div id="error" class="error-bar hidden"></div>
+  <div id="gate" class="gate hidden">
+    <h1>Overnight Desk</h1>
+    <p class="muted">Paste your desk link once. It stays on this phone.</p>
+    <form id="gate-form">
+      <input id="desk-link" type="text" autocomplete="off" autocapitalize="off" placeholder="Paste your desk link" required/>
+      <button type="submit">Open desk</button>
+    </form>
+  </div>
+  <div id="app">
+    <div class="navbar">
+      <div class="avatar" id="avatar" title="Account"></div>
+      <div class="brand">Grok Bot ›</div>
+      <input class="search" placeholder="name, symbol or mint" aria-label="Search"/>
+    </div>
+    <section id="tab-home">
+      <div class="odometer" id="balance">—</div>
+      <div class="row">
+        <span id="today" class="pill green"></span>
+        <span id="mult" class="pill green"></span>
+        <span id="paper" class="pill orange">PAPER</span>
+        <span id="market" class="pill">Green market</span>
+      </div>
+      <div class="card"><canvas id="chart" width="360" height="180"></canvas></div>
+      <h2 class="muted">Bots · 5</h2>
+      <div class="carousel" id="bot-carousel">
+        <div class="bot-card">Scanner</div>
+        <div class="bot-card">Analyst</div>
+        <div class="bot-card">Brain</div>
+        <div class="bot-card">Executor</div>
+        <div class="bot-card">Risk</div>
+      </div>
+    </section>
+    <section id="tab-bots" class="hidden"><h2>Bots</h2><p class="muted">Status and last decisions appear here once the desk is live.</p></section>
+    <section id="tab-activity" class="hidden"><h2>Activity</h2><p class="muted" id="activity-empty">Nothing yet tonight</p></section>
+    <section id="tab-account" class="hidden">
+      <h2>Account</h2>
+      <p><a id="profile" href="#">Your FOMO profile</a></p>
+      <p><a id="signup" href="#">Invite a friend</a></p>
+      <p class="muted">LIVE trades real cash on FOMO. New coins can go to 0 in minutes. Only put in what you can lose.</p>
+    </section>
+  </div>
+  <nav class="tabs">
+    <button data-tab="home" class="active">Home</button>
+    <button data-tab="bots">Bots</button>
+    <button data-tab="activity">Activity</button>
+    <button data-tab="account">Account</button>
+  </nav>
+  <script src="chart.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
