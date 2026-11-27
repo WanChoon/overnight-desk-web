@@ -158,11 +158,21 @@
     }
   }
 
+  function setRefreshing(on) {
+    const btn = document.getElementById("refresh");
+    if (!btn) return;
+    btn.disabled = !!on;
+    btn.classList.toggle("is-loading", !!on);
+    if (on) btn.setAttribute("aria-busy", "true");
+    else btn.removeAttribute("aria-busy");
+  }
+
   async function load() {
     const seq = ++loadSeq;
     if (inflight) inflight.abort();
     const ctrl = new AbortController();
     inflight = ctrl;
+    setRefreshing(true);
     const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
     const opts = { cache: "no-store", signal: ctrl.signal };
     const activityPromise = fetch(apiUrl("/api/activity"), opts).catch(() => null);
@@ -186,6 +196,7 @@
       if (inflight === ctrl) inflight = null;
     }
     if (seq !== loadSeq) return;
+    setRefreshing(false);
     render();
     return !state.err;
   }
@@ -569,6 +580,9 @@
       if (gateErr) gateErr.classList.add("hidden");
     });
   }
+
+  const refreshBtn = document.getElementById("refresh");
+  if (refreshBtn) refreshBtn.addEventListener("click", () => load());
 
   document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
 
