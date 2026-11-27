@@ -10,7 +10,7 @@
   <meta name="theme-color" content="#000000"/>
   <link rel="apple-touch-icon" href="icons/icon-180.png"/>
   <link rel="manifest" href="manifest.json"/>
-  <link rel="stylesheet" href="app.css"/>
+  <link rel="stylesheet" href="app.css?v=2"/>
   <title>Grok Bot · Overnight Desk</title>
 </head>
 <body>
@@ -19,7 +19,8 @@
     <h1>Overnight Desk</h1>
     <p class="muted">Paste your desk link once. It stays on this phone.</p>
     <form id="gate-form">
-      <input id="desk-link" type="text" autocomplete="off" autocapitalize="off" placeholder="Paste your desk link" required/>
+      <input id="desk-link" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Paste your desk link" required/>
+      <p id="gate-error" class="gate-error hidden" role="alert"></p>
       <button type="submit">Open desk</button>
     </form>
   </div>
@@ -27,7 +28,7 @@
     <div class="navbar">
       <div class="avatar" id="avatar" title="Account"></div>
       <div class="brand">Grok Bot ›</div>
-      <input class="search" placeholder="name, symbol or mint" aria-label="Search"/>
+      <input id="search" class="search" placeholder="name, symbol or mint" aria-label="Search" autocomplete="off" autocapitalize="off"/>
     </div>
     <section id="tab-home">
       <div class="odometer" id="balance">—</div>
@@ -37,8 +38,9 @@
         <span id="paper" class="pill orange">PAPER</span>
         <span id="market" class="pill">Green market</span>
       </div>
+      <p id="live-meta" class="live-meta muted hidden"></p>
       <div class="card"><canvas id="chart" width="360" height="180"></canvas></div>
-      <h2 class="muted">Bots · 5</h2>
+      <h2 class="muted" id="bots-heading">Bots · 5</h2>
       <div class="carousel" id="bot-carousel">
         <div class="bot-card">Scanner</div>
         <div class="bot-card">Analyst</div>
@@ -46,9 +48,13 @@
         <div class="bot-card">Executor</div>
         <div class="bot-card">Risk</div>
       </div>
+      <div id="open-positions" class="pos-block hidden">
+        <h2 class="muted">Open positions</h2>
+        <div id="open-list"></div>
+      </div>
     </section>
-    <section id="tab-bots" class="hidden"><h2>Bots</h2><p class="muted">Status and last decisions appear here once the desk is live.</p></section>
-    <section id="tab-activity" class="hidden"><h2>Activity</h2><p class="muted" id="activity-empty">Nothing yet tonight</p></section>
+    <section id="tab-bots" class="hidden"><h2>Bots</h2><div id="bot-list" class="bot-stack"></div></section>
+    <section id="tab-activity" class="hidden"><h2>Activity</h2><p class="muted" id="activity-empty">Nothing yet tonight</p><div id="activity-list"></div></section>
     <section id="tab-account" class="hidden">
       <h2>Account</h2>
       <p><a id="profile" href="#">Your FOMO profile</a></p>
@@ -63,6 +69,6 @@
     <button data-tab="account">Account</button>
   </nav>
   <script src="chart.js"></script>
-  <script src="app.js"></script>
+  <script src="app.js?v=2"></script>
 </body>
 </html>
