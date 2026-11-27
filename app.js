@@ -1,4 +1,4 @@
-/* Overnight Desk iPhone app — Plan A /api/* or Plan B #d={DATA_PATH} polling. */
+/* Overnight Desk iPhone app — Plan A /api/* or Plan B #d= polling. */
 (function () {
   /* FOMO hrefs come from the desk payload (built only by links.py). Never hardcode them here. */
 
@@ -9,27 +9,44 @@
 
   function parseDeskLink(raw) {
     raw = (raw || "").trim();
-    const hash = (raw.split("#")[1] || location.hash || "").replace(/^#/, "");
-    const params = new URLSearchParams(hash.startsWith("d=") || hash.includes("d=") ? hash.replace(/^#/, "") : "");
+    const hashPart = raw.includes("#") ? raw.split("#").slice(1).join("#") : (location.hash || "");
+    const hash = hashPart.replace(/^#/, "");
+    const params = new URLSearchParams(hash);
     let dataPath = params.get("d");
+    let base = params.get("base") || null;
     if (!dataPath && hash.startsWith("d=")) dataPath = decodeURIComponent(hash.slice(2).split("&")[0]);
+    if (dataPath && /^https?:\/\//i.test(dataPath)) {
+      try {
+        const u = new URL(dataPath);
+        base = u.origin;
+        const parts = u.pathname.replace(/\/+$/, "").split("/").filter(Boolean);
+        if (parts[0] === "d" && parts[1]) dataPath = parts[1];
+      } catch (e) {}
+    } else if (base) {
+      try {
+        base = new URL(base, location.origin).origin;
+      } catch (e) {
+        base = String(base).replace(/\/+$/, "");
+      }
+    }
     let token = null;
     try {
       const u = new URL(raw, location.origin);
       token = u.searchParams.get("token") || u.searchParams.get("APP_TOKEN");
     } catch (e) {}
     if (!token && raw && !raw.startsWith("http") && raw.length > 16 && !dataPath) token = raw;
-    return { token: token, dataPath: dataPath };
+    return { token: token, dataPath: dataPath, base: base || null };
   }
 
   const state = { tab: "home", data: null, err: null, cfg: stored() };
 
   function apiUrl(path) {
     if (state.cfg && state.cfg.dataPath) {
-      const base = "d/" + state.cfg.dataPath;
-      if (path === "/api/state") return base + "/state.json";
-      if (path === "/api/activity") return base + "/activity.json";
-      return base + path.replace("/api/", "/") + ".json";
+      const origin = (state.cfg.base || "").replace(/\/+$/, "");
+      const folder = (origin ? origin + "/" : "") + "d/" + state.cfg.dataPath;
+      if (path === "/api/state") return folder + "/state.json";
+      if (path === "/api/activity") return folder + "/activity.json";
+      return folder + path.replace("/api/", "/") + ".json";
     }
     const q = state.cfg && state.cfg.token ? ((path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(state.cfg.token)) : "";
     return path.replace(/^\//, "") ? path + q : path;
@@ -87,6 +104,7 @@
     if (location.hash && location.hash.includes("d=")) {
       const fromHash = parseDeskLink(location.href);
       parsed.dataPath = parsed.dataPath || fromHash.dataPath;
+      parsed.base = parsed.base || fromHash.base;
     }
     saveStored(parsed);
     state.cfg = parsed;
