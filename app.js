@@ -22,7 +22,8 @@
     return { token: token, dataPath: dataPath };
   }
 
-  const state = { tab: "home", data: null, err: null, cfg: stored() };
+  const state = { tab: "home", data: null, activity: null, err: null, cfg: stored() };
+  let loading = false;
 
   function apiUrl(path) {
     if (state.cfg && state.cfg.dataPath) {
@@ -35,17 +36,87 @@
     return path.replace(/^\//, "") ? path + q : path;
   }
 
+  function setRefreshing(on) {
+    const btn = document.getElementById("refresh");
+    if (!btn) return;
+    btn.disabled = !!on;
+    btn.classList.toggle("is-loading", !!on);
+    if (on) btn.setAttribute("aria-busy", "true");
+    else btn.removeAttribute("aria-busy");
+  }
+
   async function load() {
+    if (loading) return;
+    loading = true;
+    setRefreshing(true);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 12000);
+    const opts = { cache: "no-store", signal: ctrl.signal };
     try {
-      const r = await fetch(apiUrl("/api/state"), { cache: "no-store" });
+      const settled = await Promise.allSettled([
+        fetch(apiUrl("/api/state"), opts),
+        fetch(apiUrl("/api/activity"), opts)
+      ]);
+      const stateResult = settled[0];
+      const activityResult = settled[1];
+      if (activityResult.status === "fulfilled" && activityResult.value.ok) {
+        try { state.activity = await activityResult.value.json(); } catch (e) {}
+      }
+      if (stateResult.status !== "fulfilled") {
+        const reason = stateResult.reason;
+        const timedOut = reason && reason.name === "AbortError";
+        throw timedOut ? Object.assign(new Error("timed out"), { name: "AbortError" }) : (reason || new Error("Desk offline"));
+      }
+      const r = stateResult.value;
       if (r.status === 401) throw new Error("unauthorized");
       if (!r.ok) throw new Error("Desk offline");
       state.data = await r.json();
       state.err = null;
     } catch (e) {
-      state.err = e.message || "Desk offline";
+      state.err = (e && e.name === "AbortError") ? "timed out" : ((e && e.message) || "Desk offline");
+    } finally {
+      clearTimeout(timer);
+      loading = false;
+      setRefreshing(false);
+      render();
     }
-    render();
+  }
+
+  function activityEntries(payload) {
+    const raw = !payload ? [] : Array.isArray(payload) ? payload : (
+      Array.isArray(payload.events) ? payload.events :
+      Array.isArray(payload.items) ? payload.items :
+      Array.isArray(payload.activity) ? payload.activity : []
+    );
+    return raw.slice(0, 40).map((item) => {
+      if (typeof item === "string") return { label: item, time: "" };
+      if (!item || typeof item !== "object") return null;
+      const label = item.text || item.message || item.title || item.summary || item.label || item.action || "";
+      const time = item.time || item.ts || item.at || item.when || "";
+      if (!label && !time) return null;
+      return { label: label ? String(label) : "Update", time: time ? String(time) : "" };
+    }).filter(Boolean);
+  }
+
+  function renderActivity() {
+    const empty = document.getElementById("activity-empty");
+    const list = document.getElementById("activity-list");
+    if (!empty || !list) return;
+    const entries = activityEntries(state.activity);
+    list.textContent = "";
+    empty.classList.toggle("hidden", entries.length > 0);
+    entries.forEach((entry) => {
+      const row = document.createElement("div");
+      row.className = "activity-row";
+      const label = document.createElement("span");
+      label.textContent = entry.label;
+      const time = document.createElement("span");
+      time.className = "muted";
+      time.textContent = entry.time;
+      row.appendChild(label);
+      row.appendChild(time);
+      list.appendChild(row);
+    });
   }
 
   function render() {
@@ -69,6 +140,7 @@
     const prof = document.getElementById("profile");
     if (d.profile) { prof.href = d.profile; prof.textContent = "Your FOMO profile"; }
     if (d.signup) document.getElementById("signup").href = d.signup;
+    renderActivity();
     showTab(state.tab);
   }
 
@@ -92,6 +164,7 @@
     state.cfg = parsed;
     load();
   });
+  document.getElementById("refresh").addEventListener("click", () => load());
   document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
   if (location.hash && location.hash.includes("d=")) {
     const parsed = parseDeskLink(location.href);

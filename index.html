@@ -10,7 +10,7 @@
   <meta name="theme-color" content="#000000"/>
   <link rel="apple-touch-icon" href="icons/icon-180.png"/>
   <link rel="manifest" href="manifest.json"/>
-  <link rel="stylesheet" href="app.css"/>
+  <link rel="stylesheet" href="app.css?v=3"/>
   <title>Grok Bot · Overnight Desk</title>
 </head>
 <body>
@@ -28,6 +28,10 @@
       <div class="avatar" id="avatar" title="Account"></div>
       <div class="brand">Grok Bot ›</div>
       <input class="search" placeholder="name, symbol or mint" aria-label="Search"/>
+      <button type="button" id="refresh" class="refresh" aria-label="Refresh">
+        <span class="refresh-icon" aria-hidden="true">↻</span>
+        <span class="refresh-label">Refresh</span>
+      </button>
     </div>
     <section id="tab-home">
       <div class="odometer" id="balance">—</div>
@@ -48,7 +52,7 @@
       </div>
     </section>
     <section id="tab-bots" class="hidden"><h2>Bots</h2><p class="muted">Status and last decisions appear here once the desk is live.</p></section>
-    <section id="tab-activity" class="hidden"><h2>Activity</h2><p class="muted" id="activity-empty">Nothing yet tonight</p></section>
+    <section id="tab-activity" class="hidden"><h2>Activity</h2><p class="muted" id="activity-empty">Nothing yet tonight</p><div id="activity-list"></div></section>
     <section id="tab-account" class="hidden">
       <h2>Account</h2>
       <p><a id="profile" href="#">Your FOMO profile</a></p>
@@ -63,6 +67,6 @@
     <button data-tab="account">Account</button>
   </nav>
   <script src="chart.js"></script>
-  <script src="app.js"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>
