@@ -10,6 +10,7 @@
   };
   const FETCH_TIMEOUT_MS = 10000;
   const POLL_MS = 15000;
+  const COIN_PRICE_MS = 60000;
   const BOT_KEYS = ["scanner", "analyst", "brain", "executor", "risk"];
   const SETTINGS_GROUPS = ["Scanner", "Analyst", "Brain", "Executor", "Risk", "Market mode", "Copy picks", "Vault", "Repos", "Desk"];
   /* 12.5 range switch. LIVE = last 30 min, ALL = everything the desk published. */
@@ -141,6 +142,7 @@
   let loadSeq = 0;
   let inflight = null;
   let opening = false;
+  let coinPricesAt = 0;
 
   function isPlanB() {
     return !!(state.cfg && state.cfg.dataPath);
@@ -232,7 +234,9 @@
     const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
     const opts = { cache: "no-store", signal: ctrl.signal };
     const activityPromise = fetch(apiUrl("/api/activity"), opts).catch(() => null);
-    const coinsPromise = isPlanB() ? fetch(apiUrl("/api/coins"), opts).catch(() => null) : null;
+    const coinsDue = isPlanB() && Date.now() - coinPricesAt >= COIN_PRICE_MS;
+    if (coinsDue) coinPricesAt = Date.now();
+    const coinsPromise = coinsDue ? fetch(apiUrl("/api/coins"), opts).catch(() => null) : null;
     try {
       const res = await fetch(apiUrl("/api/state"), opts);
       if (seq !== loadSeq) return;
@@ -619,8 +623,83 @@
       fillText(summary, bot.summary, query);
       card.appendChild(summary);
     }
+    if (bot && bot.card && typeof bot.card === "object") appendBotDetail(card, String(bot.name || "").toLowerCase(), bot.card);
     if (stacked) appendBotControls(card, bot);
     return card;
+  }
+
+  /* 12.6 BOT CARDS: Scanner feed, Analyst 4x2 strips + score ring, Brain sizing, Executor dip bar, Risk pills. */
+  function appendBotDetail(card, key, c) {
+    const box = el("div", "bot-detail");
+    const pctNum = (v) => { const n = num(v); return n == null ? null : n; };
+    if (key === "scanner") {
+      box.appendChild(el("div", "bot-big", countText(c.pools) + (num(c.pools) === 1 ? " pool" : " pools")));
+      (Array.isArray(c.feed) ? c.feed : []).slice(0, 5).forEach((f) => {
+        const row = el("div", "feed-row" + (f.passed ? "" : " killed"));
+        row.appendChild(el("span", "feed-sym", f.symbol || shortMint(f.mint) || "—"));
+        row.appendChild(el("span", "feed-why", f.passed ? "→ Analyst" : String(f.reason || "killed")));
+        box.appendChild(row);
+      });
+    } else if (key === "analyst") {
+      box.appendChild(el("div", "bot-big", countText(c.taken) + " taken apart"));
+      const last = c.last;
+      if (last && typeof last === "object") {
+        const wrap = el("div", "an-wrap");
+        const strips = el("div", "strips");
+        (Array.isArray(last.layers) ? last.layers : []).slice(0, 8).forEach((L) => {
+          const s = el("span", "strip " + (L && L.pass === true ? "ok" : (L && L.pass === false ? "bad" : "na")));
+          s.title = (L && L.name) ? ("Layer " + L.n + " · " + L.name) : ("Layer " + (L && L.n));
+          strips.appendChild(s);
+        });
+        wrap.appendChild(strips);
+        const sc = pctNum(last.score);
+        const ring = el("div", "ring" + (sc != null && sc >= (num(c.pass_score) || 70) ? " green" : ""));
+        ring.style.setProperty("--p", String(sc == null ? 0 : Math.max(0, Math.min(100, sc))));
+        ring.appendChild(el("span", "", sc == null ? "—" : String(Math.round(sc))));
+        wrap.appendChild(ring);
+        box.appendChild(wrap);
+        const sub = [last.symbol || shortMint(last.mint)];
+        if (num(last.social_pts)) sub.push("Social +" + trimNum(num(last.social_pts), 0));
+        box.appendChild(el("p", "bot-note muted", sub.filter(Boolean).join(" · ")));
+      }
+    } else if (key === "brain") {
+      box.appendChild(el("div", "bot-big", "Sizing"));
+      const last = c.last;
+      if (last && typeof last === "object" && num(last.usd) != null) {
+        const pc = num(last.pct_cash);
+        box.appendChild(el("p", "bot-line", money2(last.usd) + (pc != null ? " · " + trimNum(pc, 1) + "% of cash" : "") + " · " + (last.symbol || shortMint(last.mint))));
+        const full = num(c.full_score) || 80;
+        if (last.full != null) box.appendChild(el("span", "pill mini " + (last.full ? "pass" : "wait"), last.full ? trimNum(full, 0) + "+ = full size" : "under " + trimNum(full, 0) + " = half size"));
+      } else {
+        box.appendChild(el("p", "bot-note muted", "No order sized yet"));
+      }
+    } else if (key === "executor") {
+      box.appendChild(el("div", "bot-big", countText(c.trades) + (num(c.trades) === 1 ? " trade" : " trades")));
+      const now = c.now;
+      if (now && now.state === "clicking") {
+        box.appendChild(el("p", "bot-line", "Clicking Buy… · " + (now.symbol || shortMint(now.mint))));
+      } else if (now && now.state === "waiting") {
+        const bar = el("div", "dip-bar");
+        bar.appendChild(el("span", "", "Waiting for a dip -" + trimNum(num(c.dip_pct) || 15, 0) + "% · " + (now.symbol || shortMint(now.mint))));
+        box.appendChild(bar);
+      }
+      const last = c.last;
+      if (last && typeof last === "object") {
+        const verb = last.side === "sell" ? "Sold" : "Bought";
+        box.appendChild(el("p", "bot-line" + (last.verified ? " ok" : " err"),
+          (last.verified ? "✓ " + verb + " · verified" : verb + " · " + String(last.status || "")) + " · " + (last.symbol || shortMint(last.mint))));
+      }
+    } else if (key === "risk") {
+      box.appendChild(el("div", "bot-big", "Guarding" + (num(c.guarding) ? " " + countText(c.guarding) : "")));
+      const pills = el("div", "row");
+      pills.appendChild(el("span", "pill mini kill", "stop -" + trimNum(num(c.stop_pct) || 25, 0) + "%"));
+      pills.appendChild(el("span", "pill mini pass", "trail " + trimNum(num(c.trail_pct) || 40, 0) + "%"));
+      box.appendChild(pills);
+      (Array.isArray(c.positions) ? c.positions : []).slice(0, 3).forEach((p) => {
+        box.appendChild(el("p", "bot-note muted", (p.symbol || shortMint(p.mint)) + (p.trail_on ? " · trail on" : " · stop")));
+      });
+    }
+    if (box.childNodes.length) card.appendChild(box);
   }
 
   /* 12.7 Bots tab card: pause switch (Risk locked while a position is open), last 20 decisions, Settings shortcut. */
@@ -1362,6 +1441,33 @@
   }
 
   function refreshOpenScreenA() {
+    if (Date.now() - coinPricesAt < COIN_PRICE_MS) return;
+    const top = topScreen();
+    if (top && top.type === "coin") {
+      coinPricesAt = Date.now();
+      fetchCoinA(top);
+    }
+  }
+
+  /* Coin screen prices refresh every 60s. Plan B re-reads coins.json; Plan A re-asks /api/coin. */
+  async function refreshCoinPrices() {
+    if (!state.cfg || !(state.cfg.token || state.cfg.dataPath)) return;
+    if (Date.now() - coinPricesAt < COIN_PRICE_MS) return;
+    coinPricesAt = Date.now();
+    if (isPlanB()) {
+      try {
+        const res = await fetch(apiUrl("/api/coins"), { cache: "no-store" });
+        if (res && res.status === 404) state.coins = {};
+        else if (res && res.ok) {
+          const body = await res.json();
+          const coins = body && body.coins;
+          if (coins && typeof coins === "object" && !Array.isArray(coins)) state.coins = coins;
+        }
+      } catch (e) {}
+      const top = topScreen();
+      if (top && top.type === "coin") renderScreen(false);
+      return;
+    }
     const top = topScreen();
     if (top && top.type === "coin") fetchCoinA(top);
   }
@@ -1726,7 +1832,7 @@
           return;
         }
         if (isPlanB()) {
-          setMsg(msg, "LIVE is locked until STEP 15 passes", true);
+          setMsg(msg, "LIVE is locked", true);
           return;
         }
         go.disabled = true;
@@ -1769,8 +1875,10 @@
     const signup = byId("signup");
     if (signup) signup.classList.toggle("hidden", !(linkOf(acct.signup) || linkOf(d.signup)));
     const vault = acct.vault;
-    const vaultText = typeof vault === "string" && vault ? vault
-      : (vault && typeof vault === "object" && (vault.mode || vault.kind) ? String(vault.mode || vault.kind) : "—");
+    /* PDF 16.8: "Vault: plugin | files"; with no plugin the row says "files · not on iPhone". */
+    const vaultText = typeof acct.vault_text === "string" && acct.vault_text ? acct.vault_text
+      : (typeof vault === "string" && vault ? (vault === "files" ? "files · not on iPhone" : vault)
+      : (vault && typeof vault === "object" && (vault.mode || vault.kind) ? String(vault.mode || vault.kind) : "—"));
     const vaultNode = byId("acct-vault");
     if (vaultNode) vaultNode.textContent = vaultText;
     const pushes = acct.pushes && typeof acct.pushes === "object" ? acct.pushes : null;
@@ -1917,7 +2025,8 @@
     });
   }
 
-  /* Copy picks scaffold: real picks.every / picks.time values, always disabled until STEP 15 passes. */
+  /* 12.11 / P3 Copy picks: schedule (Plan B: the Telegram `set` command), one #1c1c1e card per trader of the
+     newest list (7d / 30d in green, Profile button, last buy row, "Copy on desk" switch), then the last 7 lists. */
   function appendPicks(card, rows, d) {
     const every = rows.find((r) => r.key === "picks.every") || {};
     const time = rows.find((r) => r.key === "picks.time") || {};
@@ -1926,38 +2035,93 @@
     top.appendChild(el("span", "setting-key", "picks.every"));
     wrap.appendChild(top);
     const choices = Array.isArray(every.choices) && every.choices.length ? every.choices.map(String) : ["off", "24h", "12h", "6h"];
-    wrap.appendChild(segmented(choices.map((c) => ({ value: c, label: c === "off" ? "Off" : c })), every.value == null ? null : String(every.value), true, null));
+    const cur = every.value == null ? null : String(every.value);
+    wrap.appendChild(segmented(choices.map((c) => ({ value: c, label: c === "off" ? "Off" : c })), cur, false,
+      (v) => openCommandSheet("set picks.every " + v)));
     const timeRow = el("div", "setting-top");
     timeRow.appendChild(el("span", "setting-key", "picks.time"));
     const tIn = el("input");
     tIn.type = "time";
-    tIn.disabled = true;
     tIn.value = /^\d{2}:\d{2}$/.test(String(time.value)) ? String(time.value) : "";
     tIn.setAttribute("aria-label", "picks.time");
+    tIn.addEventListener("change", () => { if (/^\d{2}:\d{2}$/.test(tIn.value)) openCommandSheet("set picks.time " + tIn.value); });
     timeRow.appendChild(tIn);
     wrap.appendChild(timeRow);
-    wrap.appendChild(el("p", "acct-note muted", "Turns on after STEP 15 passes"));
+    wrap.appendChild(el("p", "acct-note muted", cur && cur !== "off"
+      ? "The copy-picks routine sends the list every " + cur + " from " + (time.value || "21:30") + " (Telegram)."
+      : "Off: no list is sent."));
     card.appendChild(wrap);
     const picks = Array.isArray(d.picks) ? d.picks.filter((p) => p && typeof p === "object") : [];
     if (!picks.length) {
       card.appendChild(el("p", "acct-note muted", "No picks yet"));
       return;
     }
-    newestFirst(picks, "ts").forEach((p) => {
-      const row = el("div", "picks-row");
-      const label = [p.rank != null ? "#" + p.rank : "", p.handle ? "@" + String(p.handle).replace(/^@/, "") : ""].join(" ").trim() || "—";
-      const prof = linkOf(p.profile);
-      let left = el("span", "", label);
-      if (prof) {
-        left = el("a", "fomo-link", label);
-        left.href = prof;
-        left.target = "_blank";
-        left.rel = "noopener";
-      }
-      row.appendChild(left);
-      row.appendChild(el("span", "muted", p.ts ? formatWhen(p.ts) : ""));
-      card.appendChild(row);
-    });
+    const lists = {};
+    picks.forEach((p) => { const k = String(p.ts || ""); (lists[k] = lists[k] || []).push(p); });
+    const stamps = Object.keys(lists).sort().reverse();
+    const newest = (lists[stamps[0]] || []).slice().sort((a, b) => (num(a.rank) || 99) - (num(b.rank) || 99));
+    card.appendChild(el("p", "acct-note muted", "Grok Bot · " + newest.length + " traders worth copying · " + formatWhen(stamps[0])));
+    newest.forEach((p) => card.appendChild(traderCard(p)));
+    if (stamps.length > 1) {
+      const det = el("details", "decisions");
+      det.appendChild(el("summary", "", "Last " + Math.min(7, stamps.length) + " lists"));
+      stamps.slice(0, 7).forEach((ts) => {
+        const row = el("div", "picks-row");
+        row.appendChild(el("span", "", (lists[ts] || []).slice().sort((a, b) => (num(a.rank) || 99) - (num(b.rank) || 99))
+          .map((p) => "@" + String(p.handle || "").replace(/^@/, "")).join(" · ")));
+        row.appendChild(el("span", "muted", formatWhen(ts)));
+        det.appendChild(row);
+      });
+      card.appendChild(det);
+    }
+  }
+
+  function signedUsd(v) {
+    const n = num(v);
+    if (n == null) return "—";
+    return (n >= 0 ? "+$" : "-$") + compactUsd(Math.abs(n)).replace(/^\$/, "");
+  }
+
+  function traderCard(p) {
+    const c = el("div", "trader-card");
+    const handle = String(p.handle || "").replace(/^@/, "");
+    const head = el("div", "trader-top");
+    head.appendChild(el("span", "trader-name", (p.rank != null ? "#" + p.rank + " " : "") + "@" + handle));
+    const prof = linkOf(p.profile);
+    if (prof) {
+      const a = el("a", "pill mini", "Profile");
+      a.href = prof;
+      a.target = "_blank";
+      a.rel = "noopener";
+      head.appendChild(a);
+    }
+    c.appendChild(head);
+    const nums = el("div", "trader-nums");
+    const n7 = num(p.pnl_7d), n30 = num(p.pnl_30d);
+    nums.appendChild(el("span", n7 != null && n7 >= 0 ? "up" : "down", "7d " + signedUsd(p.pnl_7d)));
+    nums.appendChild(el("span", n30 != null && n30 >= 0 ? "up" : "down", "30d " + signedUsd(p.pnl_30d)));
+    if (p.trades != null) nums.appendChild(el("span", "muted", countText(p.trades) + " trades"));
+    c.appendChild(nums);
+    const lb = linkOf(p.last_buy);
+    const lastRow = lb ? el("a", "trader-last fomo-link") : el("div", "trader-last muted");
+    if (lb) { lastRow.href = lb; lastRow.target = "_blank"; lastRow.rel = "noopener"; }
+    lastRow.textContent = "Last buy: " + (p.last_buy_mint ? shortMint(p.last_buy_mint) : "—") + (p.last_trade_at ? " · " + formatWhen(p.last_trade_at) : "");
+    c.appendChild(lastRow);
+    const row = el("div", "bot-control");
+    row.appendChild(el("span", "bot-control-text", "Copy on desk"));
+    const sw = el("button", "switch");
+    sw.type = "button";
+    sw.setAttribute("role", "switch");
+    sw.setAttribute("aria-checked", String(!!p.copy_on));
+    sw.setAttribute("aria-label", "Copy @" + handle + " on desk");
+    const cmd = typeof p.copy_command === "string" && p.copy_command ? p.copy_command : ("copy " + handle + (p.copy_on ? " off" : " on"));
+    sw.classList.add("read-only");
+    sw.addEventListener("click", () => openCommandSheet(cmd));
+    const hit = el("span", "switch-hit");
+    hit.appendChild(sw);
+    row.appendChild(hit);
+    c.appendChild(row);
+    return c;
   }
 
   function settingRow(r) {
@@ -2216,6 +2380,7 @@
     if (!state.data) return;
     paintLiveStatus();
     refreshFrame(false);
+    if (Date.now() - coinPricesAt >= COIN_PRICE_MS) refreshCoinPrices();
   }
 
   function showGateError(message) {
