@@ -1,7 +1,7 @@
 /* Overnight Desk service worker — network-first shell, never cache API or desk data.
-   v5 drops older shell caches (v4 and the cache-first desk-shell-v1 that hung iOS Home Screen). */
-const CACHE = "desk-shell-v5";
-const SHELL = ["index.html", "app.css?v=5", "app.css", "app.js?v=5", "app.js", "chart.js", "manifest.json"];
+   v6 drops older shell caches (v5 and the cache-first desk-shell-v1 that hung iOS Home Screen). */
+const CACHE = "desk-shell-v6";
+const SHELL = ["index.html", "app.css?v=6", "app.css", "app.js?v=6", "app.js", "chart.js", "manifest.json"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(

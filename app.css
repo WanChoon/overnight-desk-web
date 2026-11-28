@@ -132,3 +132,10 @@ mark { background: rgba(255, 214, 10, 0.35); color: inherit; border-radius: 3px;
 .pill.dip { color: var(--purple); background: rgba(191, 90, 242, 0.16); }
 .pill.pass { color: var(--green); background: rgba(0, 211, 90, 0.16); }
 .pill.kill { color: var(--red); background: rgba(255, 69, 58, 0.16); }
+
+.kind.reject { color: var(--red); background: rgba(255, 69, 58, 0.18); }
+.kind.stop, .kind.danger { color: #fff; background: var(--red); }
+.kind.tp { color: #04140c; background: var(--green); }
+.kind.trail-down, .kind.warn { color: #1a1400; background: var(--orange); }
+.kind.dead { color: var(--secondary); background: var(--card-2); }
+.kind.wait { color: var(--orange); background: rgba(255, 159, 10, 0.16); }
