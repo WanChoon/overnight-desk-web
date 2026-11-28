@@ -310,3 +310,32 @@ body.has-screen { overflow: hidden; }
 .kind.trail-down, .kind.warn { color: #1a1400; background: var(--orange); }
 .kind.dead { color: var(--secondary); background: var(--card-2); }
 .kind.wait { color: var(--orange); background: rgba(255, 159, 10, 0.16); }
+
+/* GB-31: 12.6 bot cards, copy picks trader cards */
+.bot-detail { margin-top: 10px; }
+.bot-big { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; margin-bottom: 6px; }
+.feed-row { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; padding: 3px 0; }
+.feed-row .feed-sym { font-weight: 600; }
+.feed-row.killed { color: var(--secondary); }
+.feed-row.killed .feed-sym { text-decoration: line-through; text-decoration-color: var(--red); }
+.feed-row.killed .feed-why { color: var(--red); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 65%; }
+.an-wrap { display: flex; align-items: center; gap: 12px; }
+.strips { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; flex: 1; }
+.strip { height: 8px; border-radius: 4px; background: var(--card-2); }
+.strip.ok { background: var(--green); }
+.strip.bad { background: var(--red); }
+.ring { --p: 0; width: 48px; height: 48px; border-radius: 50%; flex: none; display: grid; place-items: center;
+  background: conic-gradient(var(--yellow) calc(var(--p) * 1%), var(--card-2) 0); }
+.ring.green { background: conic-gradient(var(--green) calc(var(--p) * 1%), var(--card-2) 0); }
+.ring span { width: 38px; height: 38px; border-radius: 50%; background: var(--card); display: grid; place-items: center;
+  font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.bot-line { font-size: 13px; margin: 4px 0; font-variant-numeric: tabular-nums; }
+.bot-line.ok { color: var(--green); }
+.dip-bar { background: var(--card-2); border-radius: 8px; padding: 6px 8px; font-size: 12px; margin: 4px 0; }
+.trader-card { background: #1c1c1e; border-radius: 14px; padding: 12px; margin: 8px 0; }
+.trader-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.trader-name { font-weight: 600; }
+.trader-nums { display: flex; gap: 12px; font-size: 13px; margin: 6px 0; font-variant-numeric: tabular-nums; }
+.trader-nums .up { color: var(--green); }
+.trader-nums .down { color: var(--red); }
+.trader-last { display: block; font-size: 13px; margin-bottom: 4px; overflow-wrap: anywhere; }
