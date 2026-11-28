@@ -10,7 +10,7 @@
   <meta name="theme-color" content="#000000"/>
   <link rel="apple-touch-icon" href="icons/icon-180.png"/>
   <link rel="manifest" href="manifest.json"/>
-  <link rel="stylesheet" href="app.css?v=3"/>
+  <link rel="stylesheet" href="app.css?v=4"/>
   <title>Grok Bot · Overnight Desk</title>
 </head>
 <body>
@@ -42,6 +42,7 @@
         <span id="paper" class="pill orange">PAPER</span>
         <span id="market" class="pill">Green market</span>
       </div>
+      <p id="equity-line" class="equity-line muted hidden"></p>
       <p id="live-meta" class="live-meta muted hidden"></p>
       <div class="card"><canvas id="chart" width="360" height="180"></canvas></div>
       <h2 class="muted" id="bots-heading">Bots · 5</h2>
@@ -73,6 +74,6 @@
     <button data-tab="account">Account</button>
   </nav>
   <script src="chart.js"></script>
-  <script src="app.js?v=3"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>

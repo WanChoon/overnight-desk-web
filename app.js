@@ -326,6 +326,22 @@
     return sign + "$" + body;
   }
 
+  function money2(n) {
+    const x = Number(n);
+    if (!isFinite(x)) return "—";
+    return "$" + x.toFixed(2);
+  }
+
+  function equityView(d) {
+    const start = d.start_cash != null ? Number(d.start_cash) : 100;
+    const cash = d.cash != null ? Number(d.cash) : (d.balance != null ? Number(d.balance) : null);
+    const posVal = d.positions_value != null ? Number(d.positions_value) : 0;
+    const equity = d.equity != null ? Number(d.equity) : (cash != null && isFinite(cash) ? cash + (isFinite(posVal) ? posVal : 0) : null);
+    const pct = d.equity_pct != null ? Number(d.equity_pct) : (equity != null && isFinite(equity) && start > 0 ? (equity / start - 1) * 100 : (d.today_pct != null ? Number(d.today_pct) : null));
+    const mult = d.equity_x != null ? Number(d.equity_x) : (equity != null && isFinite(equity) && start > 0 ? equity / start : (d.multiplier != null ? Number(d.multiplier) : null));
+    return { cash: cash, positions: posVal, equity: equity, pct: pct, mult: mult };
+  }
+
   function safeHttp(url) {
     try {
       const u = new URL(url, location.origin);
@@ -458,7 +474,9 @@
   function paintChart() {
     if (typeof window === "undefined" || !window.DeskChart || state.tab !== "home") return;
     const d = state.data || {};
-    window.DeskChart.drawChart(document.getElementById("chart"), (d.chart && d.chart.points) || [{ value: d.balance || 100 }, { value: d.balance || 100 }]);
+    const ev = equityView(d);
+    const fallback = (ev.equity != null && isFinite(ev.equity)) ? ev.equity : (d.balance || 100);
+    window.DeskChart.drawChart(document.getElementById("chart"), (d.chart && d.chart.points) || [{ value: fallback }, { value: fallback }]);
   }
 
   function showTab(name) {
@@ -491,9 +509,25 @@
       gateErr.textContent = "";
       gateErr.classList.add("hidden");
     }
-    document.getElementById("balance").textContent = d.balance != null ? Number(d.balance).toFixed(2) : "—";
-    document.getElementById("today").textContent = d.today_pct != null ? ((d.today_pct >= 0 ? "+" : "") + Number(d.today_pct).toFixed(2) + "%") : "";
-    document.getElementById("mult").textContent = d.multiplier != null ? (Number(d.multiplier).toFixed(2) + "x") : "";
+    const ev = equityView(d);
+    document.getElementById("balance").textContent = ev.equity != null && isFinite(ev.equity) ? ev.equity.toFixed(2) : "—";
+    const today = document.getElementById("today");
+    today.textContent = ev.pct != null && isFinite(ev.pct) ? ((ev.pct >= 0 ? "+" : "") + ev.pct.toFixed(2) + "%") : "";
+    today.className = "pill " + ((ev.pct != null && ev.pct < 0) ? "down" : "green");
+    const mult = document.getElementById("mult");
+    mult.textContent = ev.mult != null && isFinite(ev.mult) ? ev.mult.toFixed(2) + "x" : "";
+    mult.className = "pill " + ((ev.mult != null && ev.mult < 1) ? "down" : "green");
+    const eqLine = document.getElementById("equity-line");
+    if (eqLine) {
+      if (ev.cash != null && isFinite(ev.cash) && ev.equity != null && isFinite(ev.equity)) {
+        const pos = (ev.positions != null && isFinite(ev.positions)) ? ev.positions : 0;
+        eqLine.textContent = "Cash " + money2(ev.cash) + " · Positions " + money2(pos) + " · Total " + money2(ev.equity);
+        eqLine.classList.remove("hidden");
+      } else {
+        eqLine.textContent = "";
+        eqLine.classList.add("hidden");
+      }
+    }
     const paper = document.getElementById("paper");
     paper.classList.toggle("hidden", d.mode !== "PAPER");
     const mkt = document.getElementById("market");
@@ -607,5 +641,5 @@
   if (state.cfg && (state.cfg.token || state.cfg.dataPath)) load();
   else render();
   setInterval(() => { if (state.cfg && (state.cfg.token || state.cfg.dataPath)) load(); }, 15000);
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js?v=4").catch(() => {});
 })();
