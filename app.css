@@ -76,6 +76,8 @@ canvas { width: 100%; height: auto; display: block; }
 .activity-symbol { font-weight: 600; }
 .activity-detail { font-size: 13px; overflow-wrap: anywhere; }
 .activity-time { font-variant-numeric: tabular-nums; font-size: 12px; flex: none; }
+.equity-line { font-size: 14px; line-height: 1.4; margin: 8px 0 0; font-variant-numeric: tabular-nums; }
+.pill.down { color: var(--red); }
 .live-meta { font-size: 13px; line-height: 1.4; margin: 8px 0 0; }
 .bot-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex: 0 0 auto; }
