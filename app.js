@@ -294,13 +294,46 @@
   }
 
   function activityHit(row, q) {
-    return [row && row.symbol, row && row.mint, row && row.kind, row && row.detail, row && row.time, row && row.score].some((v) => String(v == null ? "" : v).toLowerCase().includes(q));
+    return [row && row.symbol, row && row.mint, row && row.kind, row && row.verdict, row && row.detail, row && row.reason_text, row && row.rule, row && row.time, row && row.score].some((v) => String(v == null ? "" : v).toLowerCase().includes(q));
   }
 
   function kindClass(kind) {
     const k = String(kind || "").toLowerCase();
     if (k === "skip" || k === "pass" || k === "buy" || k === "sell" || k === "regime" || k === "scan") return k;
     return "other";
+  }
+
+  function pillInfo(row) {
+    const kind = String((row && row.kind) || "").toLowerCase();
+    let label = String((row && (row.verdict || row.pill)) || "").trim();
+    if (!label) {
+      if (kind === "skip" || kind === "kill") label = "REJECT";
+      else if (kind) label = kind.toUpperCase();
+    }
+    if (!label) return null;
+    return { label: label, className: "pill mini " + pillClass(label, row, kind) };
+  }
+
+  function pillClass(label, row, kind) {
+    const v = String(label || "").toUpperCase();
+    if (v === "REJECT" || v === "SKIP" || v === "KILL") return "kind reject";
+    if (v === "STOP") return "kind stop";
+    if (v === "TAKE PROFIT" || v.indexOf("TP ") === 0) return "kind tp";
+    if (v === "TRAIL") {
+      const pnl = Number(row && row.pnl_usd);
+      return (isFinite(pnl) && pnl > 0) ? "kind tp" : "kind trail-down";
+    }
+    if (v === "DEAD MONEY") return "kind dead";
+    if (v === "PULLED" || v === "DEV DUMPING" || v === "NO PRICE") return "kind danger";
+    if (v === "FOMO WARNS" || v === "SOLD THE NEWS" || v === "LOCK") return "kind warn";
+    if (v === "PASS" || v === "BUY") return "kind pass";
+    if (v === "SELL") return "kind sell";
+    if (v === "WAIT") return "kind wait";
+    return "kind " + kindClass(kind || v.toLowerCase());
+  }
+
+  function rowDetail(row) {
+    return (row && (row.reason_text || row.detail)) ? String(row.reason_text || row.detail) : "";
   }
 
   function trimNum(x, digits) {
@@ -459,11 +492,12 @@
       const label = row && row.symbol ? String(row.symbol) : (kind ? kind.toUpperCase() : "—");
       fillText(symbol, label, query);
       top.appendChild(symbol);
-      if (kind) top.appendChild(el("span", "pill mini kind " + kindClass(kind), kind.toUpperCase()));
+      const pill = pillInfo(row);
+      if (pill) top.appendChild(el("span", pill.className, pill.label));
       wrap.appendChild(top);
       const sub = el("div", "activity-sub");
       const detail = el("span", "activity-detail muted");
-      fillText(detail, row && row.detail ? String(row.detail) : "", query);
+      fillText(detail, rowDetail(row), query);
       sub.appendChild(detail);
       sub.appendChild(el("span", "activity-time muted", formatWhen(row && row.time)));
       wrap.appendChild(sub);
@@ -610,14 +644,14 @@
         const symbol = el("span", "pool-symbol");
         fillText(symbol, (row && row.symbol) || (row && row.mint_short) || "TOKEN", q);
         top.appendChild(symbol);
-        const pill = el("span", statusPillClass(row && row.status, row && row.verdict));
-        pill.textContent = (row && row.verdict) || (row && row.status) || "";
-        top.appendChild(pill);
+        const info = pillInfo(row);
+        if (info) top.appendChild(el("span", info.className, info.label));
         wrap.appendChild(top);
         const sub = el("div", "pool-sub");
         const detail = el("span", "pool-source muted");
         const bits = [];
-        if (row && row.reason) bits.push(row.reason);
+        const why = rowDetail(row) || (row && row.reason) || "";
+        if (why) bits.push(why);
         if (row && row.mint_short) bits.push(row.mint_short);
         fillText(detail, bits.join(" · "), q);
         sub.appendChild(detail);
@@ -820,5 +854,5 @@
   else render();
   setInterval(() => { if (state.cfg && (state.cfg.token || state.cfg.dataPath)) load(); }, 15000);
   setInterval(tickPoolCountdowns, 1000);
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js?v=5").catch(() => {});
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js?v=6").catch(() => {});
 })();
