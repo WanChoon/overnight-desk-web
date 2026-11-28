@@ -1,7 +1,7 @@
 /* Overnight Desk service worker — network-first shell, never cache API or desk data.
-   v9 (GB-32 live screen frame, Paused · private). v8 (GB-31 bot cards, copy picks). v7 drops older shell caches (v6 and earlier, incl. the cache-first desk-shell-v1 that hung iOS Home Screen). */
-const CACHE = "desk-shell-v9";
-const SHELL = ["index.html", "app.css?v=9", "app.css", "app.js?v=9", "app.js", "chart.js?v=9", "chart.js", "manifest.json"];
+   v10 (GB-34 Copy on desk acts directly). v9 (GB-32 live screen frame, Paused · private). v8 (GB-31 bot cards, copy picks). v7 drops older shell caches (v6 and earlier, incl. the cache-first desk-shell-v1 that hung iOS Home Screen). */
+const CACHE = "desk-shell-v10";
+const SHELL = ["index.html", "app.css?v=10", "app.css", "app.js?v=10", "app.js", "chart.js?v=10", "chart.js", "manifest.json"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(
