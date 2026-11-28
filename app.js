@@ -9,6 +9,15 @@
     yellow: "#ffd60a", blue: "#0a84ff", pink: "#ff6b9a", purple: "#bf5af2", white: "#ffffff"
   };
   const FETCH_TIMEOUT_MS = 10000;
+  const POLL_MS = 15000;
+  const BOT_KEYS = ["scanner", "analyst", "brain", "executor", "risk"];
+  const SETTINGS_GROUPS = ["Scanner", "Analyst", "Brain", "Executor", "Risk", "Market mode", "Copy picks", "Vault", "Repos", "Desk"];
+  /* 12.5 range switch. LIVE = last 30 min, ALL = everything the desk published. */
+  const RANGE_MS = { LIVE: 30 * 60000, "1H": 3600000, "4H": 4 * 3600000, "1D": 24 * 3600000, "1W": 7 * 24 * 3600000, ALL: null };
+  const FRAME_LIVE_MS = 5000;
+  /* Asia/Kuala_Lumpur is UTC+8 all year (no DST), so decision times need no Intl time zone data. */
+  const KL_OFFSET_MS = 8 * 3600000;
+  const BELL_KEY = "desk_bell_seen";
 
   function stored() {
     try { return JSON.parse(localStorage.getItem("desk_link") || "null"); } catch (e) { return null; }
@@ -122,18 +131,33 @@
     return parsed;
   }
 
-  const state = { tab: "home", data: null, err: null, activity: [], cfg: stored(), query: "" };
+  const state = {
+    tab: "home", data: null, err: null, activity: [], cfg: stored(), query: "",
+    coins: {}, coinsA: {}, chartRange: "ALL", chartA: null, lastGoodAt: 0, nextPollAt: 0, screens: [],
+    decisionsA: {}, decOpen: {}, botNotes: {}, botBusy: {}, settingNotes: {}, settingsSig: "", settingsDirty: false
+  };
+  /* LIVE CHART frame, double buffered: a new Image() loads off screen and is swapped in on load. */
+  const frame = { name: "", src: "", loadedAt: 0, requestedAt: 0, pending: false };
   let loadSeq = 0;
   let inflight = null;
   let opening = false;
 
+  function isPlanB() {
+    return !!(state.cfg && state.cfg.dataPath);
+  }
+
+  function dataRoot() {
+    const origin = (state.cfg.base || "").replace(/\/+$/, "");
+    const folder = String(state.cfg.dataPath).split("/").filter(Boolean).map(encodeURIComponent).join("/");
+    return (origin ? origin + "/" : "") + "d/" + folder;
+  }
+
   function apiUrl(path) {
     if (state.cfg && state.cfg.dataPath) {
-      const origin = (state.cfg.base || "").replace(/\/+$/, "");
-      const folder = String(state.cfg.dataPath).split("/").filter(Boolean).map(encodeURIComponent).join("/");
-      const root = (origin ? origin + "/" : "") + "d/" + folder;
+      const root = dataRoot();
       if (path === "/api/state") return root + "/state.json";
       if (path === "/api/activity") return root + "/activity.json";
+      if (path === "/api/coins") return root + "/coins.json";
       return root + path.replace("/api/", "/") + ".json";
     }
     const q = state.cfg && state.cfg.token ? ((path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(state.cfg.token)) : "";
@@ -158,6 +182,38 @@
     }
   }
 
+  /* Plan B coins.json: 404 = no coins yet (not an error); any other failure keeps the last good coins. */
+  async function readCoins(coinsPromise, seq) {
+    if (!coinsPromise) return;
+    try {
+      const res = await coinsPromise;
+      if (!res || seq !== loadSeq) return;
+      if (res.status === 404) {
+        state.coins = {};
+        return;
+      }
+      if (!res.ok) return;
+      const body = await res.json();
+      if (seq !== loadSeq) return;
+      const coins = body && body.coins;
+      state.coins = coins && typeof coins === "object" && !Array.isArray(coins) ? coins : {};
+    } catch (e) {}
+  }
+
+  /* Plan A only: /api/chart?range= for the picked range (ALL uses state.chart). */
+  async function loadChartA() {
+    const range = state.chartRange;
+    if (isPlanB() || range === "ALL") return;
+    try {
+      const res = await fetch(apiUrl("/api/chart?range=" + encodeURIComponent(range)), { cache: "no-store" });
+      if (!res.ok) return;
+      const body = await res.json();
+      if (range !== state.chartRange || !body) return;
+      state.chartA = { range: range, points: body.points, marks: body.marks };
+      paintChart();
+    } catch (e) {}
+  }
+
   function setRefreshing(on) {
     const btn = document.getElementById("refresh");
     if (!btn) return;
@@ -176,6 +232,7 @@
     const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
     const opts = { cache: "no-store", signal: ctrl.signal };
     const activityPromise = fetch(apiUrl("/api/activity"), opts).catch(() => null);
+    const coinsPromise = isPlanB() ? fetch(apiUrl("/api/coins"), opts).catch(() => null) : null;
     try {
       const res = await fetch(apiUrl("/api/state"), opts);
       if (seq !== loadSeq) return;
@@ -186,11 +243,18 @@
       if (seq !== loadSeq) return;
       state.data = body;
       state.err = null;
+      state.lastGoodAt = Date.now();
       await readActivity(activityPromise, seq);
+      await readCoins(coinsPromise, seq);
+      if (!isPlanB()) {
+        loadChartA();
+        refreshOpenScreenA();
+      }
     } catch (e) {
       if (seq !== loadSeq) return;
       state.err = (e && e.name === "AbortError") ? "timed out" : ((e && e.message) || "Desk offline");
       await activityPromise;
+      await coinsPromise;
     } finally {
       clearTimeout(timer);
       if (inflight === ctrl) inflight = null;
@@ -265,7 +329,15 @@
       const n = Number(s);
       return n < 1e12 ? n * 1000 : n;
     }
-    return Date.parse(s);
+    /* Desk timestamps carry microseconds ("…18.759750Z"); trim to ms so every Safari parses them. */
+    return Date.parse(s.replace(/(\.\d{3})\d+/, "$1"));
+  }
+
+  function klClock(value) {
+    const ms = epochMs(value);
+    if (isNaN(ms)) return "—";
+    const d = new Date(ms + KL_OFFSET_MS);
+    return String(d.getUTCHours()).padStart(2, "0") + ":" + String(d.getUTCMinutes()).padStart(2, "0");
   }
 
   function formatWhen(value) {
@@ -275,8 +347,9 @@
     return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
   }
 
-  function newestFirst(rows) {
-    return rows.map((row, i) => ({ row: row, i: i, t: epochMs(row && row.time) })).sort((a, b) => {
+  function newestFirst(rows, field) {
+    const key = field || "time";
+    return rows.map((row, i) => ({ row: row, i: i, t: epochMs(row && row[key]) })).sort((a, b) => {
       const at = isNaN(a.t) ? -Infinity : a.t;
       const bt = isNaN(b.t) ? -Infinity : b.t;
       if (bt !== at) return bt - at;
@@ -383,6 +456,133 @@
     return "";
   }
 
+  function linkOf(value) {
+    return typeof value === "string" && value.trim() ? safeHttp(value.trim()) : "";
+  }
+
+  /* null/""/missing stays null (shown as "—"), never 0. */
+  function num(value) {
+    if (value == null || value === "" || typeof value === "boolean") return null;
+    const x = Number(value);
+    return isFinite(x) ? x : null;
+  }
+
+  function byId(id) {
+    return document.getElementById(id);
+  }
+
+  function shortMint(mint) {
+    const s = mint ? String(mint) : "";
+    return s.length > 10 ? s.slice(0, 4) + "…" + s.slice(-4) : s;
+  }
+
+  function reducedMotion() {
+    try {
+      return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function compactUsd(value) {
+    const x = num(value);
+    if (x == null) return "—";
+    const abs = Math.abs(x);
+    if (abs >= 1e9) return "$" + trimNum(x / 1e9, 1) + "B";
+    if (abs >= 1e6) return "$" + trimNum(x / 1e6, 1) + "M";
+    if (abs >= 1e3) return "$" + trimNum(x / 1e3, 1) + "K";
+    return "$" + trimNum(x, abs >= 100 ? 0 : 2);
+  }
+
+  function countText(value) {
+    const x = num(value);
+    return x == null ? "—" : Math.round(x).toLocaleString("en-US");
+  }
+
+  function ageHours(h) {
+    return h >= 10 ? String(Math.round(h)) : trimNum(h, 1);
+  }
+
+  function boolOf(value) {
+    if (value === true || value === false) return value;
+    const s = String(value == null ? "" : value).trim().toLowerCase();
+    if (s === "1" || s === "true" || s === "on" || s === "yes") return true;
+    if (s === "0" || s === "false" || s === "off" || s === "no") return false;
+    return null;
+  }
+
+  function accountOf(d) {
+    return d && d.account && typeof d.account === "object" ? d.account : {};
+  }
+
+  function modeOf(d) {
+    return (d && d.mode) || accountOf(d).mode || "";
+  }
+
+  function setMsg(node, text, isErr) {
+    if (!node) return;
+    node.textContent = text || "";
+    node.classList.toggle("hidden", !text);
+    node.classList.toggle("err", !!text && !!isErr);
+    node.classList.toggle("ok", !!text && !isErr);
+  }
+
+  /* Clipboard first; else select the text (in `input` when given) and try execCommand. */
+  async function copyText(text, input) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (e) {}
+    const node = input || document.createElement("textarea");
+    if (!input) {
+      node.value = text;
+      node.setAttribute("readonly", "");
+      node.style.position = "fixed";
+      node.style.opacity = "0";
+      document.body.appendChild(node);
+    }
+    let ok = false;
+    try {
+      node.focus();
+      node.select();
+      if (node.setSelectionRange) node.setSelectionRange(0, String(text).length);
+      ok = document.execCommand("copy");
+    } catch (e) {}
+    if (!input) node.remove();
+    return ok;
+  }
+
+  /* Plan A only. Plan B files are static, so nothing is ever POSTed there. */
+  async function postJson(path, payload) {
+    if (isPlanB()) return { ok: false, status: 0, body: null };
+    try {
+      const res = await fetch(apiUrl(path), {
+        method: "POST",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload || {})
+      });
+      let body = null;
+      try { body = await res.json(); } catch (e) {}
+      return { ok: res.ok, status: res.status, body: body };
+    } catch (e) {
+      return { ok: false, status: 0, body: null };
+    }
+  }
+
+  function errText(out) {
+    const b = out && out.body;
+    if (b && typeof b.error === "string" && b.error) return b.error;
+    if (b && b.errors && typeof b.errors === "object") {
+      const first = Object.keys(b.errors).map((k) => b.errors[k]).find((v) => typeof v === "string" && v);
+      if (first) return first;
+    }
+    if (b && typeof b.detail === "string" && b.detail) return b.detail;
+    return out && out.status ? "Desk said HTTP " + out.status : "Desk offline";
+  }
+
   function liveMeta(data) {
     const bits = [];
     const clock = formatWhen(data && data.updated_at);
@@ -419,7 +619,125 @@
       fillText(summary, bot.summary, query);
       card.appendChild(summary);
     }
+    if (stacked) appendBotControls(card, bot);
     return card;
+  }
+
+  /* 12.7 Bots tab card: pause switch (Risk locked while a position is open), last 20 decisions, Settings shortcut. */
+  function appendBotControls(card, bot) {
+    const d = state.data || {};
+    const key = String((bot && bot.name) || "").toLowerCase();
+    if (BOT_KEYS.indexOf(key) < 0) return;
+    const paused = d.paused && typeof d.paused[key] === "boolean" ? d.paused[key] : null;
+    if (paused !== null) {
+      const positions = Array.isArray(d.open_positions) ? d.open_positions : [];
+      const locked = key === "risk" && positions.length > 0 && !paused;
+      const row = el("div", "bot-control");
+      row.appendChild(el("span", "bot-control-text muted", locked ? "Locked · position open" : (paused ? "Paused" : "Running")));
+      const sw = el("button", "switch");
+      sw.type = "button";
+      sw.setAttribute("role", "switch");
+      sw.setAttribute("aria-checked", String(!paused));
+      sw.setAttribute("aria-label", titleName(key) + (paused ? " paused" : " running"));
+      if (locked || state.botBusy[key]) {
+        sw.disabled = true;
+      } else if (isPlanB()) {
+        sw.classList.add("read-only");
+        sw.addEventListener("click", () => openCommandSheet((paused ? "resume " : "pause ") + key));
+      } else {
+        sw.addEventListener("click", () => toggleBot(key, paused));
+      }
+      const hit = el("span", "switch-hit");
+      hit.appendChild(sw);
+      row.appendChild(hit);
+      card.appendChild(row);
+      const note = state.botNotes[key];
+      if (note && note.text) card.appendChild(el("p", "bot-note " + (note.err ? "err" : "muted"), note.text));
+    }
+    const rows = decisionsFor(key, d);
+    const det = el("details", "decisions");
+    det.open = !!state.decOpen[key];
+    det.appendChild(el("summary", "", "Last 20 decisions"));
+    if (rows) {
+      if (!rows.length) det.appendChild(el("p", "bot-note muted", "No decisions yet"));
+      rows.slice(0, 20).forEach((row) => det.appendChild(decisionRow(row)));
+    } else {
+      const a = state.decisionsA[key];
+      det.appendChild(el("p", "bot-note muted", isPlanB() ? "—" : (a === "error" ? "Couldn't load decisions" : "Loading…")));
+    }
+    det.addEventListener("toggle", () => {
+      state.decOpen[key] = det.open;
+      if (det.open && !rows && !isPlanB() && state.decisionsA[key] === undefined) loadDecisionsA(key);
+    });
+    card.appendChild(det);
+    const settings = el("button", "link-btn", "Settings");
+    settings.type = "button";
+    settings.addEventListener("click", () => openSettingsGroup(titleName(key)));
+    card.appendChild(settings);
+  }
+
+  function decisionsFor(key, d) {
+    if (d && d.decisions && Array.isArray(d.decisions[key])) return d.decisions[key];
+    const a = state.decisionsA[key];
+    return Array.isArray(a) ? a : null;
+  }
+
+  async function loadDecisionsA(key) {
+    state.decisionsA[key] = "loading";
+    try {
+      const res = await fetch(apiUrl("/api/bots/" + encodeURIComponent(key) + "/decisions"), { cache: "no-store" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const body = await res.json();
+      const rows = Array.isArray(body) ? body : (body && (Array.isArray(body.rows) ? body.rows : body.decisions));
+      state.decisionsA[key] = Array.isArray(rows) ? rows : "error";
+    } catch (e) {
+      state.decisionsA[key] = "error";
+    }
+    renderBots(state.data);
+  }
+
+  function decisionRow(row) {
+    const mint = row && row.mint;
+    const link = linkOf(row && (row.coin_url || row.link));
+    let node;
+    if (mint && hasCoin(mint)) {
+      node = el("button", "dec-row");
+      node.type = "button";
+      node.addEventListener("click", () => openScreen({ type: "coin", mint: mint, hint: { symbol: row.symbol, link: link } }));
+    } else if (link) {
+      node = el("a", "dec-row");
+      node.href = link;
+      node.target = "_blank";
+      node.rel = "noopener";
+    } else {
+      node = el("div", "dec-row");
+    }
+    node.appendChild(el("span", "dec-time", klClock(row && row.ts)));
+    node.appendChild(el("span", "dec-symbol", (row && row.symbol) || shortMint(mint) || "—"));
+    const verdict = row && row.verdict != null ? String(row.verdict) : "";
+    const text = row && row.text != null ? String(row.text) : "";
+    node.appendChild(el("span", "dec-text", [verdict, text !== verdict ? text : ""].filter(Boolean).join(" · ")));
+    return node;
+  }
+
+  async function toggleBot(key, paused) {
+    if (state.botBusy[key]) return;
+    state.botBusy[key] = true;
+    state.botNotes[key] = { text: paused ? "Resuming…" : "Pausing…" };
+    renderBots(state.data);
+    const out = await postJson("/api/bots/" + encodeURIComponent(key) + "/" + (paused ? "resume" : "pause"), {});
+    state.botBusy[key] = false;
+    const message = out.body && typeof out.body.message === "string" ? out.body.message : "";
+    state.botNotes[key] = out.ok ? { text: message } : { text: errText(out), err: true };
+    if (out.ok) await load();
+    else renderBots(state.data);
+  }
+
+  function openSettingsGroup(group) {
+    closeAllScreens();
+    showTab("account");
+    const target = byId(groupId(group));
+    if (target && target.scrollIntoView) target.scrollIntoView({ block: "start", behavior: reducedMotion() ? "auto" : "smooth" });
   }
 
   function renderBots(data) {
@@ -432,6 +750,13 @@
     const list = document.getElementById("bot-list");
     if (carousel) clear(carousel);
     if (list) clear(list);
+    if (!state.data) {
+      for (let i = 0; i < all.length; i++) {
+        if (carousel) carousel.appendChild(el("div", "bot-card sk-block"));
+        if (list) list.appendChild(el("div", "bot-card sk-block"));
+      }
+      return;
+    }
     let shown = 0;
     all.forEach((bot, i) => {
       if (q && !botHit(bot, q)) return;
@@ -465,6 +790,13 @@
       row.appendChild(left);
       const pnl = Number(p && p.pnl_pct);
       if (isFinite(pnl)) row.appendChild(el("div", "pnl " + (pnl < 0 ? "down" : "up"), (pnl >= 0 ? "+" : "") + pnl.toFixed(2) + "%"));
+      if (p && p.mint && hasCoin(p.mint)) {
+        // 12.10: a position opens its Coin screen (Sell now lives there).
+        row.classList.add("tappable");
+        row.setAttribute("role", "button");
+        row.tabIndex = 0;
+        row.addEventListener("click", () => openScreen({ type: "coin", mint: p.mint, hint: { symbol: p.symbol, link: linkOf(p.link || p.coin_url) } }));
+      }
       list.appendChild(row);
     });
   }
@@ -478,39 +810,318 @@
     const all = newestFirst(state.activity || []);
     const rows = q ? all.filter((row) => activityHit(row, q)) : all;
     clear(list);
+    if (!state.data) {
+      empty.classList.add("hidden");
+      skeletonRows(list, 5);
+      return;
+    }
     if (!rows.length) {
       empty.textContent = q && all.length ? "No matches" : "Nothing yet tonight";
       empty.classList.remove("hidden");
       return;
     }
     empty.classList.add("hidden");
-    rows.forEach((row) => {
-      const wrap = el("div", "activity-row");
-      const kind = String((row && row.kind) || "").toLowerCase();
-      const top = el("div", "activity-top");
-      const symbol = el("span", "activity-symbol");
-      const label = row && row.symbol ? String(row.symbol) : (kind ? kind.toUpperCase() : "—");
-      fillText(symbol, label, query);
-      top.appendChild(symbol);
-      const pill = pillInfo(row);
-      if (pill) top.appendChild(el("span", pill.className, pill.label));
-      wrap.appendChild(top);
-      const sub = el("div", "activity-sub");
-      const detail = el("span", "activity-detail muted");
-      fillText(detail, rowDetail(row), query);
-      sub.appendChild(detail);
-      sub.appendChild(el("span", "activity-time muted", formatWhen(row && row.time)));
-      wrap.appendChild(sub);
-      list.appendChild(wrap);
-    });
+    rows.forEach((row) => list.appendChild(buildActivityRow(row, query)));
+  }
+
+  /* 12.5 Home block: last 5 rows + "See all". */
+  function renderHomeActivity() {
+    const list = byId("home-activity");
+    const empty = byId("home-activity-empty");
+    if (!list || !empty) return;
+    clear(list);
+    if (!state.data) {
+      empty.classList.add("hidden");
+      skeletonRows(list, 5);
+      return;
+    }
+    const rows = newestFirst(state.activity || []).slice(0, 5);
+    empty.classList.toggle("hidden", rows.length > 0);
+    rows.forEach((row) => list.appendChild(buildActivityRow(row, "")));
+  }
+
+  function skeletonRows(list, n) {
+    for (let i = 0; i < n; i++) list.appendChild(el("div", "sk-block sk-row"));
+  }
+
+  function buildActivityRow(row, query) {
+    const wrap = el("div", "activity-row");
+    const kind = String((row && row.kind) || "").toLowerCase();
+    const top = el("div", "activity-top");
+    const head = el("span", "activity-head");
+    const symbol = el("span", "activity-symbol");
+    const label = row && row.symbol ? String(row.symbol) : (kind ? kind.toUpperCase() : "—");
+    fillText(symbol, label, query);
+    head.appendChild(symbol);
+    const pill = pillInfo(row);
+    if (pill) head.appendChild(el("span", pill.className, pill.label));
+    top.appendChild(head);
+    const link = linkOf(row && (row.coin_url || row.link));
+    if (row && row.mint && link) {
+      const a = el("a", "fomo-link", "Open on FOMO");
+      a.href = link;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.addEventListener("click", (e) => e.stopPropagation());
+      top.classList.add("has-link");
+      top.appendChild(a);
+    }
+    wrap.appendChild(top);
+    const sub = el("div", "activity-sub");
+    const detail = el("span", "activity-detail muted");
+    fillText(detail, rowDetail(row), query);
+    sub.appendChild(detail);
+    sub.appendChild(el("span", "activity-time muted", formatWhen(row && row.time)));
+    wrap.appendChild(sub);
+    const open = activityTarget(row, link);
+    if (open) {
+      wrap.classList.add("tap");
+      wrap.setAttribute("role", "button");
+      wrap.tabIndex = 0;
+      wrap.addEventListener("click", open);
+      wrap.addEventListener("keydown", (e) => {
+        if (e.target !== wrap || (e.key !== "Enter" && e.key !== " ")) return;
+        e.preventDefault();
+        open();
+      });
+    }
+    return wrap;
+  }
+
+  /* 12.8 trades open Coin, rejects open Audit; a coin we have no data for opens its FOMO link. */
+  function activityTarget(row, link) {
+    const mint = row && row.mint;
+    if (!mint) return null;
+    const kind = String(row.kind || "").toLowerCase();
+    const verdict = String(row.verdict || "").toUpperCase();
+    const hint = { symbol: row.symbol, link: link };
+    let type = "";
+    if (kind === "buy" || kind === "sell") type = "coin";
+    else if (kind === "skip" || verdict === "REJECT") type = "audit";
+    if (!type) return null;
+    const have = type === "coin" ? hasCoin(mint) : hasAudit(mint);
+    if (have) return () => openScreen({ type: type, mint: mint, hint: hint });
+    return link ? () => window.open(link, "_blank", "noopener") : null;
+  }
+
+  /* Points inside the range; the last earlier point is carried to the window start so the line is real. */
+  function rangeSlice(points, marks, range, nowMs) {
+    const pts = (Array.isArray(points) ? points : []).filter((p) => p && num(p.value) != null);
+    const mk = Array.isArray(marks) ? marks : [];
+    const span = RANGE_MS[range];
+    if (!span || !pts.length) return { points: pts, marks: mk };
+    const times = pts.map((p) => epochMs(p.ts));
+    if (times.some((t) => isNaN(t))) return { points: pts, marks: mk };
+    const cutoff = nowMs - span;
+    const out = pts.filter((p, i) => times[i] >= cutoff);
+    const before = pts.filter((p, i) => times[i] < cutoff);
+    if (before.length) out.unshift({ ts: new Date(cutoff).toISOString(), value: before[before.length - 1].value });
+    if (out.length === 1) out.push({ ts: new Date(nowMs).toISOString(), value: out[0].value });
+    return { points: out, marks: mk.filter((m) => epochMs(m && m.ts) >= cutoff) };
   }
 
   function paintChart() {
-    if (typeof window === "undefined" || !window.DeskChart || state.tab !== "home") return;
+    if (typeof window === "undefined" || !window.DeskChart || state.tab !== "home" || !state.data) return;
     const d = state.data || {};
     const ev = equityView(d);
     const fallback = (ev.equity != null && isFinite(ev.equity)) ? ev.equity : (d.balance || 100);
-    window.DeskChart.drawChart(document.getElementById("chart"), (d.chart && d.chart.points) || [{ value: fallback }, { value: fallback }]);
+    const useA = !isPlanB() && state.chartA && state.chartA.range === state.chartRange;
+    const src = useA ? state.chartA : (d.chart || {});
+    const view = rangeSlice(src.points, src.marks, state.chartRange, Date.now());
+    const points = view.points.length ? view.points : [{ value: fallback }, { value: fallback }];
+    if (points.length === 1) points.push(Object.assign({}, points[0]));
+    window.DeskChart.drawChart(document.getElementById("chart"), points, view.marks);
+  }
+
+  function renderRanges() {
+    document.querySelectorAll("#ranges button").forEach((b) => {
+      const on = b.dataset.range === state.chartRange;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-pressed", String(on));
+    });
+  }
+
+  /* 12.5 LIVE CHART card. state.screen null = placeholder; nothing is fetched until the desk names a frame. */
+  function screenName(d) {
+    const name = d && typeof d.screen === "string" ? d.screen.trim() : "";
+    if (!name || name.charAt(0) === "/" || !/^[A-Za-z0-9._\-\/]+$/.test(name)) return "";
+    return name.split("/").some((seg) => !seg || seg === "." || seg === "..") ? "" : name;
+  }
+
+  function frameUrl(name) {
+    const file = name.split("/").map(encodeURIComponent).join("/");
+    const url = isPlanB() ? dataRoot() + "/" + file : apiUrl("/" + file);
+    return url + (url.indexOf("?") >= 0 ? "&" : "?") + "t=" + Date.now();
+  }
+
+  function refreshFrame(force) {
+    const name = screenName(state.data);
+    if (!name) {
+      frame.name = "";
+      frame.src = "";
+      frame.loadedAt = 0;
+      return;
+    }
+    const top = state.screens[state.screens.length - 1];
+    const watching = top ? top.type === "frame" : state.tab === "home";
+    if (frame.pending || !watching || document.hidden) return;
+    if (name !== frame.name) {
+      frame.name = name;
+      force = true;
+    }
+    if (!force && Date.now() - frame.requestedAt < (isPlanB() ? 15000 : 1000)) return;
+    const url = frameUrl(name);
+    const img = new Image();
+    frame.pending = true;
+    frame.requestedAt = Date.now();
+    img.onload = () => {
+      frame.pending = false;
+      if (screenName(state.data) !== name) return;
+      frame.src = url;
+      frame.loadedAt = Date.now();
+      paintLiveFrame();
+    };
+    img.onerror = () => { frame.pending = false; };
+    img.src = url;
+  }
+
+  function liveStatus() {
+    if (!screenName(state.data)) return { on: false, text: isPlanB() ? "No frames yet · Plan B" : "No frames yet" };
+    if (!frame.src) return { on: false, text: "No frames yet" };
+    if (Date.now() - frame.loadedAt < FRAME_LIVE_MS) return { on: true, text: "Live · Bot's computer" };
+    return { on: false, text: "Last frame " + formatWhen(frame.loadedAt) };
+  }
+
+  function paintLiveFrame() {
+    const has = !!(screenName(state.data) && frame.src);
+    document.querySelectorAll(".live-frame").forEach((img) => {
+      if (has) {
+        if (img.getAttribute("src") !== frame.src) img.setAttribute("src", frame.src);
+        img.classList.remove("hidden");
+      } else {
+        img.removeAttribute("src");
+        img.classList.add("hidden");
+      }
+    });
+    paintLiveStatus();
+  }
+
+  function paintLiveStatus() {
+    const s = liveStatus();
+    document.querySelectorAll(".live-dot").forEach((dot) => dot.classList.toggle("on", s.on));
+    document.querySelectorAll(".live-status-text").forEach((node) => { node.textContent = s.text; });
+  }
+
+  function botColor(d, key) {
+    const bots = d && Array.isArray(d.bots) ? d.bots : [];
+    const hit = bots.find((b) => String((b && b.name) || "").toLowerCase() === key);
+    return safeColor(hit && hit.color) || BOT_COLORS[Math.max(0, BOT_KEYS.indexOf(key)) % BOT_COLORS.length];
+  }
+
+  function laneInfo(d) {
+    const lane = d && d.lane;
+    if (!lane || typeof lane !== "object") return { text: "", color: "" };
+    const key = String(lane.bot || "").toLowerCase();
+    const text = lane.text ? String(lane.text) : (key ? titleName(key) : "Idle");
+    return { text: text, color: key ? botColor(d, key) : "var(--secondary)" };
+  }
+
+  function checksNode(checks) {
+    const box = el("span", "checks");
+    const c = checks && typeof checks === "object" ? checks : {};
+    ["screen", "api", "chain"].forEach((k) => {
+      const v = c[k];
+      const node = el("span", "check" + (v === true ? " yes" : (v === false ? " no" : "")), (v === true ? "✓ " : (v === false ? "✗ " : "– ")) + k);
+      node.setAttribute("aria-label", k + (v === true ? " verified" : (v === false ? " failed" : " not checked")));
+      box.appendChild(node);
+    });
+    return box;
+  }
+
+  /* "Bought X · $N · verified" + the screen / api / chain checks. */
+  function renderLastOrder(box, d) {
+    if (!box) return;
+    clear(box);
+    if (!d || !("last_order" in d)) return;
+    const o = d.last_order;
+    if (!o || typeof o !== "object") {
+      box.appendChild(el("span", "muted", "No orders yet"));
+      return;
+    }
+    const side = String(o.side || "").toLowerCase();
+    const verb = side === "sell" ? "Sold" : (side === "buy" ? "Bought" : "Order");
+    const bits = [(verb + " " + (o.symbol || shortMint(o.mint) || "")).trim()];
+    const amount = num(o.fill_usd) != null ? num(o.fill_usd) : num(o.usd);
+    if (amount != null) bits.push(usd(amount));
+    const status = String(o.status || "").toLowerCase();
+    if (status) bits.push(status === "done" ? "verified" : status);
+    box.appendChild(el("span", "", bits.join(" · ")));
+    box.appendChild(checksNode(o.checks));
+  }
+
+  function renderLive(d) {
+    paintLiveFrame();
+    const lane = byId("live-lane");
+    if (lane) {
+      const info = laneInfo(d);
+      lane.textContent = info.text;
+      lane.style.color = info.color;
+    }
+    renderLastOrder(byId("last-order"), d);
+  }
+
+  /* 12.5 bell: dot when activity is newer than the last time the bell was opened. */
+  function newestActivityMs() {
+    let best = 0;
+    (state.activity || []).forEach((row) => {
+      const t = epochMs(row && row.ts);
+      if (!isNaN(t) && t > best) best = t;
+    });
+    return best;
+  }
+
+  function bellSeen() {
+    try {
+      const v = Number(localStorage.getItem(BELL_KEY));
+      return isFinite(v) ? v : 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  function renderBell() {
+    const fresh = newestActivityMs() > bellSeen();
+    const dot = byId("bell-dot");
+    if (dot) dot.classList.toggle("hidden", !fresh);
+    const bell = byId("bell");
+    if (bell) bell.setAttribute("aria-label", fresh ? "Notifications, new activity" : "Notifications");
+  }
+
+  function openBell() {
+    const newest = newestActivityMs();
+    try {
+      if (newest) localStorage.setItem(BELL_KEY, String(newest));
+    } catch (e) {}
+    closeAllScreens();
+    showTab("activity");
+    renderBell();
+  }
+
+  function renderError() {
+    const err = byId("error");
+    if (!err) return;
+    err.classList.toggle("hidden", !state.err);
+    err.textContent = state.err ? offlineText() : "";
+    err.title = state.err || "";
+  }
+
+  /* 12.4 "Desk offline · retrying in {n}s · last update {time}"; the last good numbers stay on screen. */
+  function offlineText() {
+    const n = Math.max(0, Math.ceil((state.nextPollAt - Date.now()) / 1000));
+    const d = state.data || {};
+    const at = !isNaN(epochMs(d.updated_at)) ? d.updated_at : (state.lastGoodAt || null);
+    const clock = at ? formatWhen(at) : "";
+    return "Desk offline · retrying in " + n + "s · last update " + (/^\d{2}:\d{2}$/.test(clock) ? clock : "—");
   }
 
 
@@ -688,8 +1299,846 @@
     });
   }
 
+  /* ---------- Full-screen views: Coin (12.10), Audit (12.9), LIVE frame (12.5) ---------- */
+
+  function coinEntry(mint) {
+    const src = isPlanB() ? state.coins : state.coinsA;
+    const hit = src && mint ? src[mint] : null;
+    return hit && typeof hit === "object" ? hit : null;
+  }
+
+  /* Plan B can only show coins that are in coins.json; Plan A asks /api/coin and /api/audit. */
+  function hasCoin(mint) {
+    if (!mint) return false;
+    const hit = coinEntry(mint);
+    return !isPlanB() || !!(hit && hit.coin);
+  }
+
+  function hasAudit(mint) {
+    if (!mint) return false;
+    const hit = coinEntry(mint);
+    return !isPlanB() || !!(hit && hit.audit);
+  }
+
+  function openScreen(view) {
+    if (!isPlanB() && view.type !== "frame") view.loading = true;
+    state.screens.push(view);
+    renderScreen(true);
+    if (view.loading) fetchCoinA(view);
+    if (view.type === "frame") refreshFrame(true);
+  }
+
+  function closeScreen() {
+    state.screens.pop();
+    renderScreen(true);
+  }
+
+  function closeAllScreens() {
+    if (!state.screens.length) return;
+    state.screens = [];
+    renderScreen(true);
+  }
+
+  function topScreen() {
+    return state.screens[state.screens.length - 1] || null;
+  }
+
+  async function fetchCoinA(view) {
+    if (view.fetching || isPlanB()) return;
+    view.fetching = true;
+    try {
+      const res = await fetch(apiUrl("/api/" + view.type + "/" + encodeURIComponent(view.mint)), { cache: "no-store" });
+      if (!res.ok) throw new Error(res.status === 404 ? "not found" : "HTTP " + res.status);
+      const body = await res.json();
+      const entry = state.coinsA[view.mint] || (state.coinsA[view.mint] = {});
+      entry[view.type] = body;
+      view.error = "";
+    } catch (e) {
+      view.error = (e && e.message) || "Desk offline";
+    }
+    view.fetching = false;
+    view.loading = false;
+    if (topScreen() === view) renderScreen(false);
+  }
+
+  function refreshOpenScreenA() {
+    const top = topScreen();
+    if (top && top.type === "coin") fetchCoinA(top);
+  }
+
+  /* Poll refresh: Coin and frame views redraw; Audit only until its data arrives (its beam runs once). */
+  function refreshScreen() {
+    const top = topScreen();
+    if (top && (top.type !== "audit" || top.waiting)) renderScreen(false);
+  }
+
+  function renderScreen(fresh) {
+    const box = byId("screen");
+    const body = byId("screen-body");
+    if (!box || !body) return;
+    const top = topScreen();
+    document.body.classList.toggle("has-screen", !!top);
+    if (!top) {
+      box.classList.add("hidden");
+      clear(body);
+      return;
+    }
+    const keep = fresh ? 0 : box.scrollTop;
+    box.classList.remove("hidden");
+    const back = byId("screen-back");
+    if (back) back.textContent = top.type === "frame" ? "Close" : "‹ Back";
+    const title = byId("screen-title");
+    if (title) title.textContent = "";
+    clear(body);
+    if (top.type === "coin") renderCoinScreen(top, body, title);
+    else if (top.type === "audit") renderAuditScreen(top, body, title);
+    else renderFrameScreen(body, title);
+    box.scrollTop = keep;
+  }
+
+  function fomoButton(link) {
+    const a = el("a", "btn plain", "Open on FOMO");
+    a.href = link;
+    a.target = "_blank";
+    a.rel = "noopener";
+    return a;
+  }
+
+  function buttonRow(nodes) {
+    const row = el("div", "btn-row");
+    nodes.forEach((n) => row.appendChild(n));
+    return row;
+  }
+
+  function screenPlaceholder(body, view, what, link) {
+    if (view.loading) {
+      body.appendChild(el("div", "sk-block sk-row"));
+      body.appendChild(el("div", "sk-block coin-sk"));
+      body.appendChild(el("div", "sk-block sk-row"));
+    } else {
+      body.appendChild(el("p", "muted", view.error ? "Couldn't load the " + what + " · " + view.error : "No " + what + " data for this coin yet"));
+    }
+    if (link) body.appendChild(buttonRow([fomoButton(link)]));
+  }
+
+  function renderCoinScreen(view, body, title) {
+    const d = state.data || {};
+    const entry = coinEntry(view.mint) || {};
+    const hint = view.hint || {};
+    const c = entry.coin && typeof entry.coin === "object" ? entry.coin : null;
+    const symbol = (c && c.symbol) || hint.symbol || "";
+    if (title) title.textContent = symbol || "Coin";
+    const link = linkOf(c && c.link) || linkOf(hint.link);
+    if (!c) {
+      screenPlaceholder(body, view, "coin", link);
+      return;
+    }
+    const head = el("div", "coin-head");
+    head.appendChild(el("h1", "coin-name", c.name || symbol || shortMint(view.mint)));
+    if (symbol && c.name) head.appendChild(el("span", "coin-ticker", symbol));
+    if ((c.mode || modeOf(d)) === "PAPER") head.appendChild(el("span", "pill orange", "PAPER"));
+    body.appendChild(head);
+    const price = num(c.price);
+    const age = num(c.age_h);
+    const sub = el("div", "coin-sub");
+    sub.appendChild(el("span", "muted", [price != null ? "$" + fmtPrice(price) : "—", "Solana", age != null ? ageHours(age) + "h old" : "— old"].join(" · ")));
+    const passed = num(c.audit_passed);
+    const shield = el("button", "shield" + (passed == null ? "" : (passed >= 8 ? " good" : " bad")), (passed != null ? Math.round(passed) : "—") + "/8");
+    shield.type = "button";
+    shield.setAttribute("aria-label", "Audit " + shield.textContent + " layers passed");
+    if (hasAudit(view.mint)) shield.addEventListener("click", () => openScreen({ type: "audit", mint: view.mint, hint: { symbol: symbol, link: link } }));
+    else shield.disabled = true;
+    sub.appendChild(shield);
+    body.appendChild(sub);
+    body.appendChild(el("div", "coin-price", price != null ? "$" + fmtPrice(price) : "—"));
+    const pos = c.position && typeof c.position === "object" ? c.position : null;
+    const x = pos ? num(pos.x_since_entry) : null;
+    if (x != null) body.appendChild(el("div", "coin-x " + (x >= 1 ? "up" : "down"), "x" + trimNum(x, 2) + " since entry"));
+    const card = el("div", "card");
+    const canvas = el("canvas", "candles");
+    canvas.width = 360;
+    canvas.height = 200;
+    card.appendChild(canvas);
+    body.appendChild(card);
+    const drawn = window.DeskChart && window.DeskChart.drawCandles
+      ? window.DeskChart.drawCandles(canvas, c.candles, { stop: pos ? num(pos.stop_price) : null })
+      : false;
+    if (!drawn) {
+      canvas.classList.add("hidden");
+      card.appendChild(el("p", "muted", "No candles yet"));
+    }
+    const stats = el("div", "stats3");
+    [["Market cap", compactUsd(c.market_cap)], ["Liquidity", compactUsd(c.liquidity_usd)], ["Holders", countText(c.holders)]].forEach((pair) => {
+      const cell = el("div", "stat");
+      cell.appendChild(el("div", "stat-label", pair[0]));
+      cell.appendChild(el("div", "stat-value", pair[1]));
+      stats.appendChild(cell);
+    });
+    body.appendChild(stats);
+    if (pos) {
+      const size = num(pos.size_usd);
+      const bits = ["Your position", (size != null ? usd(size) : "—") + " in"];
+      if (pos.bot) bits.push(titleName(pos.bot));
+      body.appendChild(el("p", "coin-pos", bits.join(" · ")));
+    }
+    const buttons = [];
+    if (link) buttons.push(fomoButton(link));
+    if (pos) {
+      const sell = el("button", "btn danger", "Sell now");
+      sell.type = "button";
+      sell.addEventListener("click", () => openSellSheet(view.mint, symbol));
+      buttons.push(sell);
+    }
+    if (buttons.length) body.appendChild(buttonRow(buttons));
+  }
+
+  function passState(v) {
+    if (v === true || v === 1 || v === "1") return "pass";
+    if (v === false || v === 0 || v === "0") return "fail";
+    return "none";
+  }
+
+  function layerNo(layer, fallback) {
+    const n = num(layer && (layer.layer != null ? layer.layer : layer.n));
+    return n != null ? Math.round(n) : fallback;
+  }
+
+  function renderAuditScreen(view, body, title) {
+    const entry = coinEntry(view.mint) || {};
+    const hint = view.hint || {};
+    const a = entry.audit && typeof entry.audit === "object" ? entry.audit : null;
+    const coin = entry.coin && typeof entry.coin === "object" ? entry.coin : {};
+    const symbol = (a && a.symbol) || coin.symbol || hint.symbol || "";
+    if (title) title.textContent = (symbol ? symbol + " · " : "") + "Audit";
+    const link = linkOf(a && a.link) || linkOf(coin.link) || linkOf(hint.link);
+    if (!a) {
+      view.waiting = true;
+      screenPlaceholder(body, view, "audit", link);
+      return;
+    }
+    view.waiting = false;
+    const animate = !view.animated && !reducedMotion();
+    view.animated = true;
+    const layers = (Array.isArray(a.layers) ? a.layers : []).filter((l) => l && typeof l === "object");
+    const byNo = {};
+    layers.forEach((l, i) => {
+      const n = layerNo(l, i + 1);
+      if (!byNo[n]) byNo[n] = l;
+    });
+    const discs = el("div", "discs");
+    for (let n = 1; n <= 8; n++) {
+      const l = byNo[n];
+      const s = l ? passState(l.pass) : "none";
+      const disc = el("div", "disc" + (s === "none" ? "" : " " + s), s === "pass" ? "✓" : (s === "fail" ? "✗" : "–"));
+      disc.setAttribute("role", "img");
+      disc.setAttribute("aria-label", "Layer " + n + (l && l.name ? " " + l.name : "") + ": " + (s === "none" ? "no data" : s));
+      if (animate) disc.style.animationDelay = (0.1 + (n - 1) * 0.2).toFixed(2) + "s";
+      else disc.style.animation = "none";
+      discs.appendChild(disc);
+    }
+    if (animate) {
+      const beam = el("div", "beam");
+      beam.setAttribute("aria-hidden", "true");
+      beam.addEventListener("animationend", () => beam.remove());
+      discs.appendChild(beam);
+    }
+    body.appendChild(discs);
+    layers.slice().sort((x, y) => layerNo(x, 99) - layerNo(y, 99)).forEach((l) => {
+      const s = passState(l.pass);
+      const row = el("div", "layer-row");
+      const n = layerNo(l, null);
+      row.appendChild(el("span", "layer-n", n != null ? "L" + n : "—"));
+      row.appendChild(el("span", "layer-name", l.name ? String(l.name) : "—"));
+      const value = l.text != null && l.text !== "" ? l.text : l.value;
+      row.appendChild(el("span", "layer-value", value != null && value !== "" && typeof value !== "object" ? String(value) : "—"));
+      const mark = el("span", "layer-mark " + s, s === "pass" ? "✓" : (s === "fail" ? "✗" : "–"));
+      mark.setAttribute("aria-label", s === "none" ? "no data" : s);
+      row.appendChild(mark);
+      body.appendChild(row);
+    });
+    if (!layers.length) body.appendChild(el("p", "muted", "No layers recorded yet"));
+    if (typeof a.social_line === "string" && a.social_line.trim()) body.appendChild(el("div", "social-line", a.social_line));
+    if (link) body.appendChild(buttonRow([fomoButton(link)]));
+  }
+
+  function renderFrameScreen(body, title) {
+    const d = state.data || {};
+    if (title) title.textContent = "Bot's computer";
+    const card = el("div", "live-card frame-card");
+    const img = el("img", "live-frame full hidden");
+    img.alt = "Bot's computer";
+    card.appendChild(img);
+    const bar = el("div", "live-top");
+    const status = el("span", "live-status");
+    status.appendChild(el("span", "live-dot"));
+    status.appendChild(el("span", "live-status-text"));
+    bar.appendChild(status);
+    const info = laneInfo(d);
+    const lane = el("span", "live-lane", info.text);
+    lane.style.color = info.color;
+    bar.appendChild(lane);
+    card.appendChild(bar);
+    body.appendChild(card);
+    const order = el("div", "last-order");
+    renderLastOrder(order, d);
+    body.appendChild(order);
+    paintLiveFrame();
+  }
+
+  /* ---------- Sheets ---------- */
+
+  function openSheet(build) {
+    const sheet = byId("sheet");
+    const body = byId("sheet-body");
+    if (!sheet || !body) return;
+    clear(body);
+    build(body);
+    sheet.classList.remove("hidden");
+    const backdrop = byId("sheet-backdrop");
+    if (backdrop) backdrop.classList.remove("hidden");
+  }
+
+  function closeSheet() {
+    const sheet = byId("sheet");
+    if (sheet) sheet.classList.add("hidden");
+    const backdrop = byId("sheet-backdrop");
+    if (backdrop) backdrop.classList.add("hidden");
+    const body = byId("sheet-body");
+    if (body) clear(body);
+  }
+
+  function commandRow(cmd, placeholder) {
+    const row = el("div", "cmd");
+    const input = el("input");
+    input.type = "text";
+    input.readOnly = true;
+    input.placeholder = placeholder || "";
+    input.setAttribute("aria-label", "Telegram command");
+    const btn = el("button", "", "Copy");
+    btn.type = "button";
+    const set = (text) => {
+      input.value = text || "";
+      btn.disabled = !text;
+      btn.textContent = "Copy";
+    };
+    btn.addEventListener("click", async () => {
+      const ok = await copyText(input.value, input);
+      btn.textContent = ok ? "Copied" : "Select";
+    });
+    row.appendChild(input);
+    row.appendChild(btn);
+    set(cmd);
+    return { node: row, set: set };
+  }
+
+  function openCommandSheet(cmd) {
+    openSheet((box) => {
+      box.appendChild(el("h3", "", "Plan B: send this in Telegram"));
+      box.appendChild(commandRow(cmd).node);
+    });
+  }
+
+  /* options: [{value, label}]; onPick null = read-only. */
+  function segmented(options, current, disabled, onPick) {
+    const seg = el("div", "seg");
+    seg.setAttribute("role", "radiogroup");
+    const buttons = options.map((o) => {
+      const b = el("button", "", o.label);
+      b.type = "button";
+      b.setAttribute("role", "radio");
+      b.setAttribute("aria-checked", String(current != null && String(o.value).toLowerCase() === String(current).toLowerCase()));
+      b.disabled = !!disabled;
+      if (!disabled && onPick) {
+        b.addEventListener("click", () => {
+          buttons.forEach((x) => x.setAttribute("aria-checked", String(x === b)));
+          onPick(o.value);
+        });
+      }
+      seg.appendChild(b);
+      return b;
+    });
+    return seg;
+  }
+
+  /* 12.10 Sell sheet. Plan A queues /api/sell (Executor sells on its PAPER path); Plan B shows the Telegram command. */
+  function openSellSheet(mint, symbol) {
+    const name = symbol || mint;
+    openSheet((box) => {
+      box.appendChild(el("h3", "", "Sell now · " + name));
+      const msg = el("p", "sheet-msg hidden");
+      let pct = null;
+      let onPick = () => {};
+      box.appendChild(segmented([25, 50, 100].map((n) => ({ value: n, label: n + "%" })), null, false, (v) => {
+        pct = v;
+        onPick();
+      }));
+      if (isPlanB()) {
+        box.appendChild(el("p", "", "Plan B: send this in Telegram"));
+        const cmd = commandRow("", "Pick 25%, 50% or 100%");
+        box.appendChild(cmd.node);
+        box.appendChild(el("p", "muted", "The desk sells it through the Executor's PAPER path after you confirm \"yes\" in Telegram."));
+        onPick = () => cmd.set("sell now " + name + " " + pct);
+      } else {
+        const confirm = el("button", "btn danger", "Confirm sell");
+        confirm.type = "button";
+        confirm.disabled = true;
+        onPick = () => { confirm.disabled = false; setMsg(msg, "", false); };
+        confirm.addEventListener("click", async () => {
+          if (pct == null) return;
+          const sent = pct;
+          confirm.disabled = true;
+          const out = await postJson("/api/sell/" + encodeURIComponent(mint), { pct: sent, confirm: true });
+          if (out.ok) {
+            setMsg(msg, "Queued · Executor sells " + sent + "% on the next Risk poll (PAPER)", false);
+          } else {
+            setMsg(msg, errText(out), true);
+            confirm.disabled = false;
+          }
+        });
+        box.appendChild(buttonRow([confirm]));
+      }
+      box.appendChild(msg);
+    });
+  }
+
+
+  /* 12.11 LIVE needs the word LIVE typed; this build answers that LIVE is locked. */
+  function openLiveSheet() {
+    const d = state.data || {};
+    openSheet((box) => {
+      box.appendChild(el("h3", "", "Switch to LIVE"));
+      const warn = accountOf(d).live_warning || d.live_warning;
+      if (typeof warn === "string" && warn) box.appendChild(el("p", "muted", warn));
+      const form = el("form", "sheet-form");
+      const input = el("input", "acct-input");
+      input.type = "text";
+      input.placeholder = "Type LIVE";
+      input.autocomplete = "off";
+      input.setAttribute("autocapitalize", "characters");
+      input.setAttribute("aria-label", "Type LIVE to switch");
+      const go = el("button", "btn danger", "Switch to LIVE");
+      go.type = "submit";
+      const msg = el("p", "sheet-msg hidden");
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        if (input.value.trim() !== "LIVE") {
+          setMsg(msg, "Type LIVE to switch", true);
+          return;
+        }
+        if (isPlanB()) {
+          setMsg(msg, "LIVE is locked until STEP 15 passes", true);
+          return;
+        }
+        go.disabled = true;
+        const out = await postJson("/api/mode", { mode: "LIVE" });
+        go.disabled = false;
+        if (out.ok) {
+          setMsg(msg, (out.body && typeof out.body.message === "string" && out.body.message) || "Mode change sent", false);
+          load();
+        } else {
+          setMsg(msg, errText(out), true);
+        }
+      });
+      form.appendChild(input);
+      form.appendChild(go);
+      form.appendChild(msg);
+      box.appendChild(form);
+    });
+  }
+
+  /* ---------- Account (12.11) ---------- */
+
+  function renderAccount(d) {
+    const acct = accountOf(d);
+    const mode = modeOf(d);
+    const pill = byId("acct-mode");
+    if (pill) {
+      pill.textContent = mode || "—";
+      pill.className = "pill" + (mode === "PAPER" ? " orange" : (mode === "LIVE" ? " red" : ""));
+    }
+    const warn = byId("live-warning");
+    const warnText = acct.live_warning || d.live_warning;
+    if (warn && typeof warnText === "string" && warnText) warn.textContent = warnText;
+    renderCash(d);
+    const prof = byId("profile");
+    const profileUrl = linkOf(acct.profile) || linkOf(d.profile);
+    if (prof) {
+      prof.classList.toggle("hidden", !profileUrl);
+      if (profileUrl) prof.href = profileUrl;
+    }
+    const signup = byId("signup");
+    if (signup) signup.classList.toggle("hidden", !(linkOf(acct.signup) || linkOf(d.signup)));
+    const vault = acct.vault;
+    const vaultText = typeof vault === "string" && vault ? vault
+      : (vault && typeof vault === "object" && (vault.mode || vault.kind) ? String(vault.mode || vault.kind) : "—");
+    const vaultNode = byId("acct-vault");
+    if (vaultNode) vaultNode.textContent = vaultText;
+    const pushes = acct.pushes && typeof acct.pushes === "object" ? acct.pushes : null;
+    const tg = byId("push-telegram");
+    if (tg) tg.textContent = !pushes || pushes.telegram == null ? "—" : (pushes.telegram ? "connected" : "not connected");
+    const web = byId("push-web");
+    if (web) {
+      let text = "—";
+      if (pushes && String(pushes.plan || "").toUpperCase() === "B") text = "Plan B — Telegram only";
+      else if (pushes && pushes.webpush != null) text = pushes.webpush ? "connected" : "not connected";
+      web.textContent = text;
+    }
+  }
+
+  function renderCash(d) {
+    const box = byId("acct-cash");
+    if (!box) return;
+    const acct = accountOf(d);
+    const plan = isPlanB() ? "B" : "A";
+    if (box.dataset.plan !== plan) {
+      box.dataset.plan = plan;
+      clear(box);
+      [["Cash", "acct-cash-now"], ["Start cash", "acct-cash-start"]].forEach((pair) => {
+        const row = el("div", "acct-row");
+        row.appendChild(el("span", "", pair[0]));
+        const value = el("span", "muted", "—");
+        value.id = pair[1];
+        row.appendChild(value);
+        box.appendChild(row);
+      });
+      if (plan === "A") {
+        const form = el("form", "setting-controls");
+        const input = el("input", "acct-input");
+        input.type = "number";
+        input.inputMode = "decimal";
+        input.step = "any";
+        input.placeholder = "New cash";
+        input.setAttribute("aria-label", "Cash");
+        const save = el("button", "small-btn", "Save");
+        save.type = "submit";
+        const msg = el("p", "setting-msg hidden");
+        form.addEventListener("submit", async (e) => {
+          e.preventDefault();
+          const x = num(input.value);
+          if (x == null || x < 0) {
+            setMsg(msg, "cash must be a number", true);
+            return;
+          }
+          save.disabled = true;
+          const out = await postJson("/api/account", { cash: x });
+          save.disabled = false;
+          if (out.ok) {
+            input.value = "";
+            setMsg(msg, "Saved", false);
+            load();
+          } else {
+            setMsg(msg, errText(out), true);
+          }
+        });
+        form.appendChild(input);
+        form.appendChild(save);
+        box.appendChild(form);
+        box.appendChild(msg);
+      }
+    }
+    const cash = num(acct.cash) != null ? num(acct.cash) : num(d.cash);
+    const start = num(acct.start_cash) != null ? num(acct.start_cash) : num(d.start_cash);
+    const now = byId("acct-cash-now");
+    if (now) now.textContent = cash != null ? money2(cash) : "—";
+    const startNode = byId("acct-cash-start");
+    if (startNode) startNode.textContent = start != null ? money2(start) : "—";
+  }
+
+  async function invite() {
+    const d = state.data || {};
+    const url = linkOf(accountOf(d).signup) || linkOf(d.signup);
+    const note = byId("invite-note");
+    if (!url) return;
+    if (navigator.share) {
+      try {
+        await navigator.share({ url: url });
+        return;
+      } catch (e) {
+        if (e && e.name === "AbortError") return;
+      }
+    }
+    const ok = await copyText(url);
+    if (note) {
+      note.textContent = ok ? "Link copied" : url;
+      note.classList.remove("hidden");
+    }
+  }
+
+  function groupId(group) {
+    return "set-" + String(group || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  }
+
+  function groupRank(group) {
+    const i = SETTINGS_GROUPS.indexOf(group);
+    return i < 0 ? SETTINGS_GROUPS.length : i;
+  }
+
+  function fmtNum(x) {
+    return x == null ? "?" : String(x);
+  }
+
+  function cmdValue(v) {
+    if (v === true || v === false) return v ? "on" : "off";
+    return String(v == null ? "" : v).trim();
+  }
+
+  /* Every catalog row, grouped per bot. Rebuilt only when the catalog changes and nothing is being edited. */
+  function renderSettings(d) {
+    const box = byId("settings");
+    if (!box) return;
+    const catalog = Array.isArray(d.settings_catalog) ? d.settings_catalog.filter((r) => r && typeof r === "object" && r.key) : null;
+    const sig = JSON.stringify([isPlanB(), !!state.data, catalog, Array.isArray(d.picks) ? d.picks : null]);
+    if (sig === state.settingsSig || state.settingsDirty) return;
+    state.settingsSig = sig;
+    clear(box);
+    if (!catalog) {
+      if (state.data) box.appendChild(el("p", "muted", "Settings not published yet"));
+      return;
+    }
+    const groups = [];
+    catalog.forEach((r) => {
+      const g = String(r.group || "Other");
+      if (groups.indexOf(g) < 0) groups.push(g);
+    });
+    if (groups.indexOf("Copy picks") < 0) groups.push("Copy picks");
+    groups.sort((a, b) => groupRank(a) - groupRank(b));
+    groups.forEach((g) => {
+      const card = el("div", "group-card");
+      const head = el("h3", "", g);
+      head.id = groupId(g);
+      card.appendChild(head);
+      const rows = catalog.filter((r) => String(r.group || "Other") === g);
+      if (g === "Copy picks") appendPicks(card, rows, d);
+      rows.forEach((r) => {
+        if (g === "Copy picks" && (r.key === "picks.every" || r.key === "picks.time")) return;
+        card.appendChild(settingRow(r));
+      });
+      box.appendChild(card);
+    });
+  }
+
+  /* Copy picks scaffold: real picks.every / picks.time values, always disabled until STEP 15 passes. */
+  function appendPicks(card, rows, d) {
+    const every = rows.find((r) => r.key === "picks.every") || {};
+    const time = rows.find((r) => r.key === "picks.time") || {};
+    const wrap = el("div", "setting");
+    const top = el("div", "setting-top");
+    top.appendChild(el("span", "setting-key", "picks.every"));
+    wrap.appendChild(top);
+    const choices = Array.isArray(every.choices) && every.choices.length ? every.choices.map(String) : ["off", "24h", "12h", "6h"];
+    wrap.appendChild(segmented(choices.map((c) => ({ value: c, label: c === "off" ? "Off" : c })), every.value == null ? null : String(every.value), true, null));
+    const timeRow = el("div", "setting-top");
+    timeRow.appendChild(el("span", "setting-key", "picks.time"));
+    const tIn = el("input");
+    tIn.type = "time";
+    tIn.disabled = true;
+    tIn.value = /^\d{2}:\d{2}$/.test(String(time.value)) ? String(time.value) : "";
+    tIn.setAttribute("aria-label", "picks.time");
+    timeRow.appendChild(tIn);
+    wrap.appendChild(timeRow);
+    wrap.appendChild(el("p", "acct-note muted", "Turns on after STEP 15 passes"));
+    card.appendChild(wrap);
+    const picks = Array.isArray(d.picks) ? d.picks.filter((p) => p && typeof p === "object") : [];
+    if (!picks.length) {
+      card.appendChild(el("p", "acct-note muted", "No picks yet"));
+      return;
+    }
+    newestFirst(picks, "ts").forEach((p) => {
+      const row = el("div", "picks-row");
+      const label = [p.rank != null ? "#" + p.rank : "", p.handle ? "@" + String(p.handle).replace(/^@/, "") : ""].join(" ").trim() || "—";
+      const prof = linkOf(p.profile);
+      let left = el("span", "", label);
+      if (prof) {
+        left = el("a", "fomo-link", label);
+        left.href = prof;
+        left.target = "_blank";
+        left.rel = "noopener";
+      }
+      row.appendChild(left);
+      row.appendChild(el("span", "muted", p.ts ? formatWhen(p.ts) : ""));
+      card.appendChild(row);
+    });
+  }
+
+  function settingRow(r) {
+    const ro = isPlanB();
+    const key = String(r.key);
+    const kind = String(r.kind || "text");
+    const wrap = el("div", "setting");
+    const top = el("div", "setting-top");
+    top.appendChild(el("span", "setting-key", key));
+    wrap.appendChild(top);
+    const controls = el("div", "setting-controls");
+    const note = state.settingNotes[key];
+    const msg = el("p", "setting-msg hidden");
+    setMsg(msg, note && note.text, note && note.err);
+    const touch = () => {
+      if (ro) return;
+      state.settingsDirty = true;
+      delete state.settingNotes[key];
+      setMsg(msg, "", false);
+    };
+    let read = null;
+    let check = () => "";
+    let parse = (v) => v;
+    if (kind === "number") {
+      const v = num(r.value);
+      const lo = num(r.min);
+      const hi = num(r.max);
+      const step = num(r.step);
+      const exact = el("input");
+      exact.type = "number";
+      exact.inputMode = "decimal";
+      exact.step = step != null ? String(step) : "any";
+      if (lo != null) exact.min = String(lo);
+      if (hi != null) exact.max = String(hi);
+      exact.value = v != null ? String(v) : "";
+      exact.placeholder = "—";
+      exact.setAttribute("aria-label", key);
+      let range = null;
+      if (v != null && lo != null && hi != null && hi > lo) {
+        range = el("input");
+        range.type = "range";
+        range.min = String(lo);
+        range.max = String(hi);
+        range.step = exact.step;
+        range.value = String(v);
+        range.setAttribute("aria-label", key + " slider");
+        range.addEventListener("input", () => { exact.value = range.value; touch(); });
+        controls.appendChild(range);
+      }
+      exact.addEventListener("input", () => {
+        const x = num(exact.value);
+        if (range && x != null && x >= lo && x <= hi) range.value = String(x);
+        touch();
+      });
+      controls.appendChild(exact);
+      if (ro) {
+        exact.disabled = true;
+        if (range) range.disabled = true;
+      }
+      read = () => exact.value.trim();
+      check = (val) => {
+        const x = num(val);
+        if (lo != null && hi != null && (x == null || x < lo || x > hi)) return key + " must be " + fmtNum(lo) + " to " + fmtNum(hi);
+        return x == null ? key + " needs a number" : "";
+      };
+      parse = (val) => num(val);
+    } else if (kind === "choice") {
+      const choices = Array.isArray(r.choices) ? r.choices.map(String) : [];
+      let current = r.value == null || r.value === "" ? null : String(r.value);
+      if (choices.length && choices.length <= 4) {
+        controls.appendChild(segmented(choices.map((c) => ({ value: c, label: c })), current, ro, (val) => { current = val; touch(); }));
+      } else {
+        const select = el("select");
+        select.setAttribute("aria-label", key);
+        choices.forEach((c) => {
+          const opt = el("option", "", c);
+          opt.value = c;
+          select.appendChild(opt);
+        });
+        select.value = current != null ? current : "";
+        select.disabled = ro;
+        select.addEventListener("change", () => { current = select.value; touch(); });
+        controls.appendChild(select);
+      }
+      read = () => current;
+      check = (val) => (val == null || choices.indexOf(String(val)) < 0) ? key + " must be one of: " + choices.join(", ") : "";
+    } else if (kind === "time") {
+      const input = el("input");
+      input.type = "time";
+      input.value = /^\d{2}:\d{2}$/.test(String(r.value)) ? String(r.value) : "";
+      input.disabled = ro;
+      input.setAttribute("aria-label", key);
+      input.addEventListener("input", touch);
+      controls.appendChild(input);
+      read = () => input.value;
+      check = (val) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(val)) ? "" : key + " must be a time HH:MM (00:00 to 23:59)";
+    } else if (kind === "bool") {
+      let on = boolOf(r.value);
+      const sw = el("button", "switch");
+      sw.type = "button";
+      sw.setAttribute("role", "switch");
+      sw.setAttribute("aria-checked", String(on === true));
+      sw.setAttribute("aria-label", key);
+      if (ro) {
+        sw.disabled = true;
+      } else {
+        sw.addEventListener("click", () => {
+          on = !on;
+          sw.setAttribute("aria-checked", String(on));
+          touch();
+        });
+      }
+      controls.appendChild(sw);
+      if (on === null) controls.appendChild(el("span", "muted", "—"));
+      read = () => on;
+      check = (val) => (val === true || val === false) ? "" : key + " must be on or off";
+    } else if (r.masked) {
+      controls.appendChild(el("span", "muted", r.value ? "set" : "not set"));
+    } else {
+      const input = el("input");
+      input.type = "text";
+      input.maxLength = 100;
+      input.value = r.value == null ? "" : String(r.value);
+      input.disabled = ro;
+      input.setAttribute("aria-label", key);
+      input.autocomplete = "off";
+      input.addEventListener("input", touch);
+      controls.appendChild(input);
+      read = () => input.value.trim();
+      check = (val) => String(val).length > 100 ? key + " must be plain text up to 100 characters" : "";
+    }
+    wrap.appendChild(controls);
+    if (read) {
+      const actions = el("div", "setting-actions");
+      if (ro) {
+        const copy = el("button", "small-btn", "Copy Telegram command");
+        copy.type = "button";
+        copy.addEventListener("click", async () => {
+          const cmd = "set " + key + " to " + cmdValue(read());
+          const ok = await copyText(cmd);
+          setMsg(msg, (ok ? "Copied: " : "Copy this: ") + cmd, false);
+        });
+        actions.appendChild(copy);
+      } else {
+        const save = el("button", "small-btn", "Save");
+        save.type = "button";
+        save.addEventListener("click", async () => {
+          const val = read();
+          const bad = check(val);
+          if (bad) {
+            setMsg(msg, bad, true);
+            return;
+          }
+          const update = {};
+          update[key] = parse(val);
+          save.disabled = true;
+          const out = await postJson("/api/settings", { settings: update });
+          save.disabled = false;
+          const errs = out.body && out.body.errors;
+          const err = (errs && typeof errs[key] === "string" && errs[key]) || (out.ok ? "" : errText(out));
+          state.settingNotes[key] = { text: err || "Saved", err: !!err };
+          setMsg(msg, err || "Saved", !!err);
+          if (!err) {
+            state.settingsDirty = false;
+            load();
+          }
+        });
+        actions.appendChild(save);
+      }
+      actions.appendChild(msg);
+      wrap.appendChild(actions);
+    } else {
+      wrap.appendChild(msg);
+    }
+    return wrap;
+  }
+
+
   function showTab(name) {
     state.tab = name;
+    if (name !== "account") state.settingsDirty = false;
     ["home", "pool", "bots", "activity", "account"].forEach((t) => {
       const section = document.getElementById("tab-" + t);
       if (section) section.classList.toggle("hidden", t !== name);
@@ -708,18 +2157,16 @@
     if (gate) gate.classList.toggle("hidden", !need);
     if (need) return;
     const d = state.data || {};
-    const err = document.getElementById("error");
-    if (err) {
-      err.classList.toggle("hidden", !state.err);
-      err.textContent = state.err ? ("Desk offline · " + state.err) : "";
-    }
+    /* 12.4 first load: #1c1c1e pulsing blocks in the final layout instead of "—". */
+    document.body.classList.toggle("is-skeleton", !state.data);
+    renderError();
     const gateErr = document.getElementById("gate-error");
     if (!state.err && gateErr) {
       gateErr.textContent = "";
       gateErr.classList.add("hidden");
     }
     const ev = equityView(d);
-    document.getElementById("balance").textContent = ev.equity != null && isFinite(ev.equity) ? ev.equity.toFixed(2) : "—";
+    document.getElementById("balance").textContent = !state.data ? "" : (ev.equity != null && isFinite(ev.equity) ? ev.equity.toFixed(2) : "—");
     const today = document.getElementById("today");
     today.textContent = ev.pct != null && isFinite(ev.pct) ? ((ev.pct >= 0 ? "+" : "") + ev.pct.toFixed(2) + "%") : "";
     today.className = "pill " + ((ev.pct != null && ev.pct < 0) ? "down" : "green");
@@ -738,7 +2185,7 @@
       }
     }
     const paper = document.getElementById("paper");
-    paper.classList.toggle("hidden", d.mode !== "PAPER");
+    paper.classList.toggle("hidden", modeOf(d) !== "PAPER");
     const mkt = document.getElementById("market");
     mkt.textContent = d.market === "RED" ? "Red mode" : (d.market === "QUIET" ? "Quiet" : "Green market");
     mkt.className = "pill " + (d.market === "RED" ? "red" : "");
@@ -751,13 +2198,24 @@
     renderBots(d);
     renderPositions(d);
     renderActivity();
+    renderHomeActivity();
     renderPool();
-    const prof = document.getElementById("profile");
-    const profileUrl = d.profile ? safeHttp(d.profile) : "";
-    if (profileUrl) { prof.href = profileUrl; prof.textContent = "Your FOMO profile"; }
-    const signupUrl = d.signup ? safeHttp(d.signup) : "";
-    if (signupUrl) document.getElementById("signup").href = signupUrl;
+    renderRanges();
+    renderLive(d);
+    renderBell();
+    renderAccount(d);
+    renderSettings(d);
+    refreshFrame(false);
     showTab(state.tab);
+    refreshScreen();
+  }
+
+  /* Once a second: offline countdown, LIVE frame age and its refresh (15s Plan B, 1s Plan A). */
+  function tickSecond() {
+    if (state.err) renderError();
+    if (!state.data) return;
+    paintLiveStatus();
+    refreshFrame(false);
   }
 
   function showGateError(message) {
@@ -799,6 +2257,10 @@
     }
     saveStored(parsed);
     state.cfg = parsed;
+    state.coins = {};
+    state.coinsA = {};
+    state.chartA = null;
+    state.decisionsA = {};
     try {
       const ok = await load();
       if (ok) {
@@ -830,6 +2292,53 @@
 
   document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
 
+  const bellBtn = byId("bell");
+  if (bellBtn) bellBtn.addEventListener("click", openBell);
+
+  const avatar = byId("avatar");
+  if (avatar) avatar.addEventListener("click", () => { closeAllScreens(); showTab("account"); });
+
+  const seeAll = byId("see-all");
+  if (seeAll) seeAll.addEventListener("click", () => showTab("activity"));
+
+  document.querySelectorAll("#ranges button").forEach((b) => b.addEventListener("click", () => {
+    state.chartRange = b.dataset.range;
+    renderRanges();
+    paintChart();
+    loadChartA();
+  }));
+
+  const liveCard = byId("live-card");
+  if (liveCard) {
+    liveCard.addEventListener("click", () => { if (state.data) openScreen({ type: "frame" }); });
+    liveCard.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      if (state.data) openScreen({ type: "frame" });
+    });
+  }
+
+  const screenBack = byId("screen-back");
+  if (screenBack) screenBack.addEventListener("click", closeScreen);
+  const sheetClose = byId("sheet-close");
+  if (sheetClose) sheetClose.addEventListener("click", closeSheet);
+  const sheetBackdrop = byId("sheet-backdrop");
+  if (sheetBackdrop) sheetBackdrop.addEventListener("click", closeSheet);
+
+  const switchLive = byId("switch-live");
+  if (switchLive) switchLive.addEventListener("click", openLiveSheet);
+  const signupBtn = byId("signup");
+  if (signupBtn) signupBtn.addEventListener("click", invite);
+  const testPush = byId("test-push");
+  if (testPush) {
+    testPush.addEventListener("click", () => {
+      const note = byId("test-push-note");
+      if (!note) return;
+      note.textContent = "Send /status in Telegram to test";
+      note.classList.remove("hidden");
+    });
+  }
+
   const search = document.getElementById("search");
   if (search) {
     search.addEventListener("input", () => {
@@ -850,9 +2359,14 @@
     const parsed = parseDeskLink(location.href);
     if (parsed.dataPath) { saveStored(Object.assign(stored() || {}, parsed)); state.cfg = stored(); }
   }
+  render();
   if (state.cfg && (state.cfg.token || state.cfg.dataPath)) load();
-  else render();
-  setInterval(() => { if (state.cfg && (state.cfg.token || state.cfg.dataPath)) load(); }, 15000);
+  state.nextPollAt = Date.now() + POLL_MS;
+  setInterval(() => {
+    state.nextPollAt = Date.now() + POLL_MS;
+    if (state.cfg && (state.cfg.token || state.cfg.dataPath)) load();
+  }, POLL_MS);
   setInterval(tickPoolCountdowns, 1000);
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js?v=6").catch(() => {});
+  setInterval(tickSecond, 1000);
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js?v=7").catch(() => {});
 })();
