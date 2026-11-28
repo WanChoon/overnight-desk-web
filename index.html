@@ -10,11 +10,10 @@
   <meta name="theme-color" content="#000000"/>
   <link rel="apple-touch-icon" href="icons/icon-180.png"/>
   <link rel="manifest" href="manifest.json"/>
-  <link rel="stylesheet" href="app.css?v=6"/>
+  <link rel="stylesheet" href="app.css?v=7"/>
   <title>Grok Bot · Overnight Desk</title>
 </head>
 <body>
-  <div id="error" class="error-bar hidden"></div>
   <div id="gate" class="gate hidden">
     <h1>Overnight Desk</h1>
     <p class="muted">Paste your desk link once. It stays on this phone.</p>
@@ -26,37 +25,61 @@
   </div>
   <div id="app">
     <div class="navbar">
-      <div class="avatar" id="avatar" title="Account"></div>
+      <button type="button" class="avatar" id="avatar" aria-label="Account"></button>
       <div class="brand">Grok Bot ›</div>
-      <input id="search" class="search" placeholder="name, symbol or mint" aria-label="Search" autocomplete="off" autocapitalize="off"/>
+      <span class="nav-spacer"></span>
+      <button type="button" id="bell" class="bell" aria-label="Notifications">
+        <svg class="bell-icon" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M12 3a6 6 0 0 0-6 6v3.6L4.3 15.3A1 1 0 0 0 5.1 17h13.8a1 1 0 0 0 .8-1.7L18 12.6V9a6 6 0 0 0-6-6zm-2.5 15.5a2.5 2.5 0 0 0 5 0z" fill="currentColor"/></svg>
+        <span id="bell-dot" class="bell-dot hidden" aria-hidden="true"></span>
+      </button>
       <button type="button" id="refresh" class="refresh" aria-label="Refresh">
         <span class="refresh-icon" aria-hidden="true">↻</span>
         <span class="refresh-label">Refresh</span>
       </button>
+      <input id="search" class="search" placeholder="name, symbol or mint" aria-label="Search" autocomplete="off" autocapitalize="off"/>
     </div>
+    <div id="error" class="error-bar hidden" role="status"></div>
     <section id="tab-home">
-      <div class="odometer" id="balance">—</div>
+      <div class="balance-row">
+        <div class="odometer sk" id="balance">—</div>
+        <span id="paper" class="pill orange hidden">PAPER</span>
+      </div>
       <div class="row">
-        <span id="today" class="pill green"></span>
-        <span id="mult" class="pill green"></span>
-        <span id="paper" class="pill orange">PAPER</span>
-        <span id="market" class="pill">Green market</span>
+        <span id="today" class="pill green sk"></span>
+        <span id="mult" class="pill green sk"></span>
+        <span id="market" class="pill sk">Green market</span>
       </div>
       <p id="equity-line" class="equity-line muted hidden"></p>
       <p id="live-meta" class="live-meta muted hidden"></p>
-      <div class="card"><canvas id="chart" width="360" height="180"></canvas></div>
-      <h2 class="muted" id="bots-heading">Bots · 5</h2>
-      <div class="carousel" id="bot-carousel">
-        <div class="bot-card">Scanner</div>
-        <div class="bot-card">Analyst</div>
-        <div class="bot-card">Brain</div>
-        <div class="bot-card">Executor</div>
-        <div class="bot-card">Risk</div>
+      <div class="card chart-card sk" id="chart-card"><canvas id="chart" width="360" height="180"></canvas></div>
+      <div class="ranges" id="ranges" role="group" aria-label="Chart range">
+        <button type="button" data-range="LIVE">LIVE</button>
+        <button type="button" data-range="1H">1H</button>
+        <button type="button" data-range="4H">4H</button>
+        <button type="button" data-range="1D">1D</button>
+        <button type="button" data-range="1W">1W</button>
+        <button type="button" data-range="ALL">ALL</button>
       </div>
+      <div id="live-card" class="live-card sk" role="button" tabindex="0" aria-label="Bot's computer, open full screen">
+        <img id="live-frame" class="live-frame hidden" alt="Bot's computer"/>
+        <div class="live-top">
+          <span class="live-status"><span id="live-dot" class="live-dot"></span><span id="live-status-text" class="live-status-text"></span></span>
+          <span id="live-lane" class="live-lane"></span>
+        </div>
+      </div>
+      <div id="last-order" class="last-order"></div>
+      <h2 class="muted" id="bots-heading">Bots · 5</h2>
+      <div class="carousel" id="bot-carousel"></div>
       <div id="open-positions" class="pos-block hidden">
         <h2 class="muted">Open positions</h2>
         <div id="open-list"></div>
       </div>
+      <div class="block-head">
+        <h2 class="muted">Activity · last 5</h2>
+        <button type="button" id="see-all" class="link-btn">See all</button>
+      </div>
+      <p class="muted hidden" id="home-activity-empty">Waiting for the first trade</p>
+      <div id="home-activity"></div>
     </section>
     <section id="tab-bots" class="hidden"><h2>Bots</h2><div id="bot-list" class="bot-stack"></div></section>
     <section id="tab-pool" class="hidden">
@@ -70,9 +93,30 @@
     <section id="tab-activity" class="hidden"><h2>Activity</h2><p class="muted" id="activity-empty">Nothing yet tonight</p><div id="activity-list"></div></section>
     <section id="tab-account" class="hidden">
       <h2>Account</h2>
-      <p><a id="profile" href="#">Your FOMO profile</a></p>
-      <p><a id="signup" href="#">Invite a friend</a></p>
-      <p class="muted">LIVE trades real cash on FOMO. New coins can go to 0 in minutes. Only put in what you can lose.</p>
+      <div class="group-card">
+        <div class="acct-row"><span>Mode</span><span id="acct-mode" class="pill"></span></div>
+        <p id="live-warning" class="acct-note muted">LIVE trades real cash on FOMO. New coins can go to 0 in minutes. Only put in what you can lose.</p>
+        <button type="button" id="switch-live" class="row-btn">Switch to LIVE</button>
+      </div>
+      <div class="group-card" id="acct-cash"></div>
+      <div class="group-card">
+        <a id="profile" class="row-btn hidden" href="#" target="_blank" rel="noopener">Your FOMO profile</a>
+        <button type="button" id="signup" class="row-btn hidden">Invite a friend</button>
+        <p id="invite-note" class="acct-note muted hidden" role="status"></p>
+      </div>
+      <h2 class="muted">Settings</h2>
+      <div id="settings"></div>
+      <div class="group-card">
+        <div class="acct-row"><span>Vault</span><span id="acct-vault" class="muted">—</span></div>
+        <div class="acct-row"><span>Telegram</span><span id="push-telegram" class="muted">—</span></div>
+        <div class="acct-row"><span>Web push</span><span id="push-web" class="muted">—</span></div>
+        <button type="button" id="test-push" class="row-btn">Send test push</button>
+        <p id="test-push-note" class="acct-note muted hidden" role="status"></p>
+      </div>
+      <div class="group-card">
+        <div class="acct-row"><span>Watch in Grok Bot</span></div>
+        <p class="acct-note muted">Open the Grok Bot app to watch the bot's computer</p>
+      </div>
     </section>
   </div>
   <nav class="tabs">
@@ -82,7 +126,19 @@
     <button data-tab="activity">Activity</button>
     <button data-tab="account">Account</button>
   </nav>
-  <script src="chart.js"></script>
-  <script src="app.js?v=6"></script>
+  <div id="screen" class="screen hidden" role="dialog" aria-modal="true" aria-labelledby="screen-title">
+    <div class="screen-bar">
+      <button type="button" id="screen-back" class="back-btn">‹ Back</button>
+      <span id="screen-title" class="screen-title"></span>
+    </div>
+    <div id="screen-body" class="screen-body"></div>
+  </div>
+  <div id="sheet-backdrop" class="sheet-backdrop hidden"></div>
+  <div id="sheet" class="sheet hidden" role="dialog" aria-modal="true">
+    <div id="sheet-body"></div>
+    <button type="button" id="sheet-close" class="sheet-close">Close</button>
+  </div>
+  <script src="chart.js?v=7"></script>
+  <script src="app.js?v=7"></script>
 </body>
 </html>
