@@ -16,6 +16,9 @@
   /* 12.5 range switch. LIVE = last 30 min, ALL = everything the desk published. */
   const RANGE_MS = { LIVE: 30 * 60000, "1H": 3600000, "4H": 4 * 3600000, "1D": 24 * 3600000, "1W": 7 * 24 * 3600000, ALL: null };
   const FRAME_LIVE_MS = 5000;
+  /* GB-32: Plan B publishes the newest frame every 60 s (owner-approved deviation from the PDF's 5 s),
+     so "Live" means the frame was taken under 90 s ago. */
+  const FRAME_LIVE_PLANB_MS = 90000;
   /* Asia/Kuala_Lumpur is UTC+8 all year (no DST), so decision times need no Intl time zone data. */
   const KL_OFFSET_MS = 8 * 3600000;
   const BELL_KEY = "desk_bell_seen";
@@ -138,7 +141,7 @@
     decisionsA: {}, decOpen: {}, botNotes: {}, botBusy: {}, settingNotes: {}, settingsSig: "", settingsDirty: false
   };
   /* LIVE CHART frame, double buffered: a new Image() loads off screen and is swapped in on load. */
-  const frame = { name: "", src: "", loadedAt: 0, requestedAt: 0, pending: false };
+  const frame = { name: "", src: "", ts: "", loadedAt: 0, requestedAt: 0, pending: false };
   let loadSeq = 0;
   let inflight = null;
   let opening = false;
@@ -1044,7 +1047,8 @@
     const top = state.screens[state.screens.length - 1];
     const watching = top ? top.type === "frame" : state.tab === "home";
     if (frame.pending || !watching || document.hidden) return;
-    if (name !== frame.name) {
+    const ts = screenTs(state.data);
+    if (name !== frame.name || (ts && ts !== frame.ts)) {
       frame.name = name;
       force = true;
     }
@@ -1057,6 +1061,7 @@
       frame.pending = false;
       if (screenName(state.data) !== name) return;
       frame.src = url;
+      frame.ts = ts;
       frame.loadedAt = Date.now();
       paintLiveFrame();
     };
@@ -1064,15 +1069,29 @@
     img.src = url;
   }
 
+  function screenTs(d) {
+    const t = d && typeof d.screen_ts === "string" ? d.screen_ts : "";
+    return t && !isNaN(Date.parse(t)) ? t : "";
+  }
+
+  function screenPrivate(d) {
+    return !!(d && d.screen_status === "paused-private");
+  }
+
   function liveStatus() {
+    /* PDF p6: no frames while a login or withdraw form is open; the card says so. */
+    if (screenPrivate(state.data)) return { on: false, text: "Paused · private" };
     if (!screenName(state.data)) return { on: false, text: isPlanB() ? "No frames yet · Plan B" : "No frames yet" };
     if (!frame.src) return { on: false, text: "No frames yet" };
-    if (Date.now() - frame.loadedAt < FRAME_LIVE_MS) return { on: true, text: "Live · Bot's computer" };
-    return { on: false, text: "Last frame " + formatWhen(frame.loadedAt) };
+    /* Age from the capture time the desk publishes (screen_ts), else from when the phone loaded it. */
+    const taken = frame.ts ? Date.parse(frame.ts) : frame.loadedAt;
+    const limit = isPlanB() ? FRAME_LIVE_PLANB_MS : FRAME_LIVE_MS;
+    if (Date.now() - taken < limit) return { on: true, text: "Live · Bot's computer" };
+    return { on: false, text: "Last frame " + formatWhen(taken) };
   }
 
   function paintLiveFrame() {
-    const has = !!(screenName(state.data) && frame.src);
+    const has = !!(screenName(state.data) && frame.src && !screenPrivate(state.data));
     document.querySelectorAll(".live-frame").forEach((img) => {
       if (has) {
         if (img.getAttribute("src") !== frame.src) img.setAttribute("src", frame.src);
@@ -2533,5 +2552,5 @@
   }, POLL_MS);
   setInterval(tickPoolCountdowns, 1000);
   setInterval(tickSecond, 1000);
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js?v=7").catch(() => {});
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js?v=9").catch(() => {});
 })();
