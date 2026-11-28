@@ -196,6 +196,8 @@ mark { background: rgba(255, 214, 10, 0.35); color: inherit; border-radius: 3px;
 .switch[aria-checked="true"]::after { transform: translateX(20px); }
 .switch:disabled { opacity: 0.4; cursor: default; }
 .switch.read-only { opacity: 0.75; }
+.switch.busy { opacity: 0.6; }
+.copy-fallback { margin-top: 4px; }
 .switch-hit { min-width: 51px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
 .decisions { margin-top: 8px; }
 .decisions summary { min-height: 44px; display: flex; align-items: center; color: var(--blue); font-size: 14px; cursor: pointer; list-style: none; }

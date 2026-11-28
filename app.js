@@ -1261,8 +1261,12 @@
 
   function countdownText(row, nowMs, minAge, dropAfter) {
     const status = String((row && row.status) || "");
-    if (status.indexOf("waiting DexScreener pair") === 0) return "";
     const t = poolAgeNow(row, nowMs, minAge, dropAfter);
+    // Waiting for a DexScreener pair also counts down to the 60 min room drop.
+    if (status.indexOf("waiting DexScreener pair") === 0) {
+      if (t.drop != null && t.drop > 0) return "⏱ drop in " + fmtLeft(t.drop);
+      return "";
+    }
     if (status === "waiting pool age") {
       if (t.left != null && t.left > 0) return "⏱ " + fmtLeft(t.left) + " left";
       if (t.drop != null && t.drop > 0) return "⏱ drop in " + fmtLeft(t.drop);
@@ -2101,6 +2105,130 @@
     return (n >= 0 ? "+$" : "-$") + compactUsd(Math.abs(n)).replace(/^\$/, "");
   }
 
+  /* GB-34 (owner-approved deviation from PDF Plan B): "Copy on desk" acts directly. Plan B posts
+     `copy <handle> on|off` (that one command only) to the Worker, which the desk fetches and runs through the same
+     code as the Telegram `copy` command (max 2 traders, PAPER). The switch shows pending -> confirmed / failed and
+     reverts on failure; the Telegram text stays only as the fallback when the Worker can't be reached.
+     Plan A (desk link with token) calls the desk API directly. */
+  const copyOps = {};   /* handle -> {want, status: pending|ok|failed, msg, until, fallback, slow} */
+  const copyUi = {};    /* handle -> nodes of the card on screen */
+
+  function cmdUrl(suffix) {
+    const origin = (state.cfg.base || "").replace(/\/+$/, "");
+    const folder = String(state.cfg.dataPath).split("/").filter(Boolean).map(encodeURIComponent).join("/");
+    return (origin ? origin + "/" : "") + "c/" + folder + suffix;
+  }
+
+  function copyShown(handle, serverOn) {
+    const op = copyOps[handle];
+    if (!op) return serverOn;
+    if (op.status !== "pending" && Date.now() > op.until) { delete copyOps[handle]; return serverOn; }
+    if (op.status === "pending") return op.want;
+    if (op.status === "ok") return serverOn === op.want ? serverOn : op.want;
+    return serverOn;
+  }
+
+  function paintCopy(handle) {
+    const ui = copyUi[handle];
+    if (!ui || !ui.sw.isConnected) return;
+    const on = copyShown(handle, ui.serverOn);
+    const op = copyOps[handle];
+    ui.sw.setAttribute("aria-checked", String(!!on));
+    ui.sw.classList.toggle("busy", !!op && op.status === "pending");
+    ui.sw.disabled = !!op && op.status === "pending";
+    if (!op) { setMsg(ui.msg, "", false); ui.fb.classList.add("hidden"); return; }
+    if (op.status === "pending") {
+      setMsg(ui.msg, op.slow ? "Still waiting for the desk…" : "Waiting for the desk…", false);
+      ui.msg.classList.remove("ok");
+    } else if (op.status === "ok") {
+      setMsg(ui.msg, op.msg || "Confirmed", false);
+    } else {
+      setMsg(ui.msg, op.msg || "Failed", true);
+    }
+    clear(ui.fb);
+    if (op.status === "failed" && op.fallback) {
+      ui.fb.classList.remove("hidden");
+      ui.fb.appendChild(el("p", "acct-note muted", "Send this in Telegram instead:"));
+      ui.fb.appendChild(commandRow(ui.cmdOf(op.want)).node);
+    } else {
+      ui.fb.classList.add("hidden");
+    }
+  }
+
+  function copyFail(handle, op, text, fallback) {
+    op.status = "failed";
+    op.msg = text;
+    op.fallback = !!fallback;
+    op.until = Date.now() + 30000;
+    paintCopy(handle);
+  }
+
+  function niceMsg(t) {
+    const x = String(t || "").trim();
+    return x ? x.charAt(0).toUpperCase() + x.slice(1) : "";
+  }
+
+  async function copyToggle(handle) {
+    const ui = copyUi[handle];
+    if (!ui) return;
+    const cur = copyOps[handle];
+    if (cur && cur.status === "pending") return;
+    const want = !copyShown(handle, ui.serverOn);
+    const op = { want: want, status: "pending", msg: "", until: 0, fallback: false, slow: false };
+    copyOps[handle] = op;
+    paintCopy(handle);
+    if (!isPlanB()) {
+      const out = await postJson("/api/picks/" + encodeURIComponent(handle) + "/copy?on=" + (want ? "true" : "false"), {});
+      if (!out.ok) return copyFail(handle, op, niceMsg(errText(out)), false);
+      op.status = "ok";
+      op.until = Date.now() + 15000;
+      setTimeout(() => paintCopy(handle), 15500);
+      op.msg = (want ? "Copying @" : "Stopped copying @") + handle + " (PAPER)";
+      paintCopy(handle);
+      await load();
+      return;
+    }
+    let id = null;
+    try {
+      const res = await fetch(cmdUrl("/copy"), {
+        method: "POST", cache: "no-store", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ handle: handle, on: want })
+      });
+      if (res.status === 429) return copyFail(handle, op, "Desk is busy. Try again in a minute.", false);
+      const body = res.ok ? await res.json() : null;
+      id = body && typeof body.id === "string" ? body.id : null;
+    } catch (e) {}
+    if (!id) return copyFail(handle, op, "Couldn't reach the desk.", true);
+    const t0 = Date.now();
+    let errs = 0;
+    while (Date.now() - t0 < 135000) {
+      await new Promise((r) => setTimeout(r, Date.now() - t0 < 20000 ? 2000 : 4000));
+      op.slow = Date.now() - t0 > 20000;
+      let body = null;
+      try {
+        const r = await fetch(cmdUrl("/copy/" + encodeURIComponent(id)), { cache: "no-store" });
+        body = r.ok ? await r.json() : null;
+      } catch (e) {}
+      if (!body) {
+        if (++errs >= 4) return copyFail(handle, op, "Lost contact with the desk.", true);
+        continue;
+      }
+      errs = 0;
+      if (body.status === "ok") {
+        op.status = "ok";
+        op.until = Date.now() + 15000;
+        setTimeout(() => paintCopy(handle), 15500);
+        op.msg = (want ? "Copying @" : "Stopped copying @") + handle + " (PAPER)";
+        paintCopy(handle);
+        load();
+        return;
+      }
+      if (body.status === "failed") return copyFail(handle, op, niceMsg(body.msg) || "Failed", false);
+      paintCopy(handle);
+    }
+    copyFail(handle, op, "No answer from the desk.", true);
+  }
+
   function traderCard(p) {
     const c = el("div", "trader-card");
     const handle = String(p.handle || "").replace(/^@/, "");
@@ -2134,12 +2262,17 @@
     sw.setAttribute("aria-checked", String(!!p.copy_on));
     sw.setAttribute("aria-label", "Copy @" + handle + " on desk");
     const cmd = typeof p.copy_command === "string" && p.copy_command ? p.copy_command : ("copy " + handle + (p.copy_on ? " off" : " on"));
-    sw.classList.add("read-only");
-    sw.addEventListener("click", () => openCommandSheet(cmd));
+    const msg = el("p", "setting-msg hidden");
+    const fb = el("div", "copy-fallback hidden");
+    copyUi[handle] = { sw: sw, msg: msg, fb: fb, serverOn: !!p.copy_on, cmd: cmd, cmdOf: (on) => "copy " + handle + (on ? " on" : " off") };
+    sw.addEventListener("click", () => copyToggle(handle));
     const hit = el("span", "switch-hit");
     hit.appendChild(sw);
     row.appendChild(hit);
     c.appendChild(row);
+    c.appendChild(msg);
+    c.appendChild(fb);
+    paintCopy(handle);
     return c;
   }
 
@@ -2552,5 +2685,5 @@
   }, POLL_MS);
   setInterval(tickPoolCountdowns, 1000);
   setInterval(tickSecond, 1000);
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js?v=9").catch(() => {});
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js?v=10").catch(() => {});
 })();
