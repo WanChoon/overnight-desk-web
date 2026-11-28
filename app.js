@@ -479,9 +479,184 @@
     window.DeskChart.drawChart(document.getElementById("chart"), (d.chart && d.chart.points) || [{ value: fallback }, { value: fallback }]);
   }
 
+
+  function poolData(d) {
+    const raw = d && d.pool ? d.pool : {};
+    return {
+      counts: raw.counts || {},
+      candidates: Array.isArray(raw.candidates) ? raw.candidates : [],
+      finals: Array.isArray(raw.finals) ? raw.finals : [],
+      minAge: raw.min_pool_age_min != null ? Number(raw.min_pool_age_min) : 10,
+      dropAfter: raw.drop_after_min != null ? Number(raw.drop_after_min) : 60,
+    };
+  }
+
+  function poolHit(row, q) {
+    return [row && row.symbol, row && row.mint, row && row.mint_short, row && row.status, row && row.source, row && row.reason, row && row.verdict].some((v) => String(v == null ? "" : v).toLowerCase().includes(q));
+  }
+
+  function poolAgeNow(row, nowMs, minAge, dropAfter) {
+    let age = null;
+    const ref = epochMs(row && row.age_as_of);
+    if (row && row.age_min != null && isFinite(Number(row.age_min)) && !isNaN(ref)) {
+      age = Number(row.age_min) + (nowMs - ref) / 60000;
+    } else {
+      const seen = epochMs(row && row.first_seen);
+      if (!isNaN(seen)) age = (nowMs - seen) / 60000;
+    }
+    if (age == null || !isFinite(age)) return { age: null, left: null, drop: null };
+    return { age: age, left: Math.max(0, minAge - age), drop: Math.max(0, dropAfter - age) };
+  }
+
+  function fmtLeft(minutes) {
+    if (minutes == null || !isFinite(minutes)) return "";
+    if (minutes >= 1.5) return Math.round(minutes) + " min";
+    if (minutes >= 1) return "1 min";
+    const s = Math.max(0, Math.round(minutes * 60));
+    return s + "s";
+  }
+
+  function countdownText(row, nowMs, minAge, dropAfter) {
+    const status = String((row && row.status) || "");
+    if (status.indexOf("waiting DexScreener pair") === 0) return "";
+    const t = poolAgeNow(row, nowMs, minAge, dropAfter);
+    if (status === "waiting pool age") {
+      if (t.left != null && t.left > 0) return "⏱ " + fmtLeft(t.left) + " left";
+      if (t.drop != null && t.drop > 0) return "⏱ drop in " + fmtLeft(t.drop);
+      return "";
+    }
+    return "";
+  }
+
+  function statusPillClass(status, verdict) {
+    const s = String(status || verdict || "");
+    if (s.indexOf("waiting DexScreener pair") === 0) return "pill mini pair";
+    if (s === "waiting pool age") return "pill mini wait";
+    if (s === "in Analyst" || s === "passed → Brain") return "pill mini review";
+    if (s === "waiting dip") return "pill mini dip";
+    if (s === "pass" || s === "bought") return "pill mini pass";
+    if (s === "kill") return "pill mini kill";
+    return "pill mini";
+  }
+
+  function sourceLabel(source) {
+    const s = String(source || "").toLowerCase();
+    if (s === "pumpportal") return "pumpportal";
+    if (s === "dex" || s === "dex_search") return "dex";
+    return s;
+  }
+
+  function renderPool() {
+    const chips = document.getElementById("pool-chips");
+    const empty = document.getElementById("pool-empty");
+    const list = document.getElementById("pool-list");
+    const finalsBox = document.getElementById("pool-finals");
+    const finalsHead = document.getElementById("pool-finals-heading");
+    if (!chips || !list) return;
+    const view = poolData(state.data || {});
+    const q = (state.query || "").toLowerCase();
+    const counts = view.counts;
+    const chipDefs = [
+      [counts.in_pool, "in pool"],
+      [counts.waiting_age, "waiting age"],
+      [counts.waiting_pair, "waiting pair"],
+      [counts.in_review, "in review"],
+      [counts.passed_tonight, "passed"],
+      [counts.killed_tonight, "killed"],
+    ];
+    clear(chips);
+    chipDefs.forEach((item) => {
+      const n = item[0] == null ? 0 : item[0];
+      const chip = el("span", "pill");
+      chip.textContent = n + " " + item[1];
+      chips.appendChild(chip);
+    });
+    const rows = q ? view.candidates.filter((row) => poolHit(row, q)) : view.candidates;
+    clear(list);
+    if (empty) empty.classList.toggle("hidden", rows.length > 0 || (q && view.candidates.length > 0));
+    if (empty && q && !rows.length && view.candidates.length) empty.classList.add("hidden");
+    const nowMs = Date.now();
+    rows.forEach((row) => {
+      const wrap = el("div", "pool-row");
+      const top = el("div", "pool-top");
+      const symbol = el("span", "pool-symbol");
+      const label = (row && row.symbol) || (row && row.mint_short) || "TOKEN";
+      fillText(symbol, label, q);
+      top.appendChild(symbol);
+      const pill = el("span", statusPillClass(row && row.status));
+      pill.textContent = (row && row.status) || "";
+      top.appendChild(pill);
+      wrap.appendChild(top);
+      const sub = el("div", "pool-sub");
+      const src = el("span", "pool-source muted");
+      const bits = [];
+      if (row && row.mint_short) bits.push(row.mint_short);
+      const srcLabel = sourceLabel(row && row.source);
+      if (srcLabel) bits.push(srcLabel);
+      fillText(src, bits.join(" · "), q);
+      sub.appendChild(src);
+      const cd = countdownText(row, nowMs, view.minAge, view.dropAfter);
+      if (cd) sub.appendChild(el("span", "pool-countdown", cd));
+      wrap.appendChild(sub);
+      list.appendChild(wrap);
+    });
+    const finals = q ? view.finals.filter((row) => poolHit(row, q)) : view.finals;
+    if (finalsHead) finalsHead.classList.toggle("hidden", !finals.length);
+    if (finalsBox) {
+      clear(finalsBox);
+      finals.forEach((row) => {
+        const wrap = el("div", "pool-row");
+        const top = el("div", "pool-top");
+        const symbol = el("span", "pool-symbol");
+        fillText(symbol, (row && row.symbol) || (row && row.mint_short) || "TOKEN", q);
+        top.appendChild(symbol);
+        const pill = el("span", statusPillClass(row && row.status, row && row.verdict));
+        pill.textContent = (row && row.verdict) || (row && row.status) || "";
+        top.appendChild(pill);
+        wrap.appendChild(top);
+        const sub = el("div", "pool-sub");
+        const detail = el("span", "pool-source muted");
+        const bits = [];
+        if (row && row.reason) bits.push(row.reason);
+        if (row && row.mint_short) bits.push(row.mint_short);
+        fillText(detail, bits.join(" · "), q);
+        sub.appendChild(detail);
+        if (row && row.ts) sub.appendChild(el("span", "activity-time muted", formatWhen(row.ts)));
+        wrap.appendChild(sub);
+        finalsBox.appendChild(wrap);
+      });
+    }
+  }
+
+  function tickPoolCountdowns() {
+    if (state.tab !== "pool") return;
+    const list = document.getElementById("pool-list");
+    if (!list) return;
+    const view = poolData(state.data || {});
+    const nowMs = Date.now();
+    const nodes = list.querySelectorAll(".pool-row");
+    const rows = (state.query ? view.candidates.filter((row) => poolHit(row, (state.query || "").toLowerCase())) : view.candidates);
+    nodes.forEach((node, i) => {
+      const row = rows[i];
+      if (!row) return;
+      const text = countdownText(row, nowMs, view.minAge, view.dropAfter);
+      let cd = node.querySelector(".pool-countdown");
+      if (!text) {
+        if (cd) cd.remove();
+        return;
+      }
+      if (!cd) {
+        const sub = node.querySelector(".pool-sub") || node;
+        cd = el("span", "pool-countdown");
+        sub.appendChild(cd);
+      }
+      cd.textContent = text;
+    });
+  }
+
   function showTab(name) {
     state.tab = name;
-    ["home", "bots", "activity", "account"].forEach((t) => {
+    ["home", "pool", "bots", "activity", "account"].forEach((t) => {
       const section = document.getElementById("tab-" + t);
       if (section) section.classList.toggle("hidden", t !== name);
       const btn = document.querySelector('[data-tab="' + t + '"]');
@@ -542,6 +717,7 @@
     renderBots(d);
     renderPositions(d);
     renderActivity();
+    renderPool();
     const prof = document.getElementById("profile");
     const profileUrl = d.profile ? safeHttp(d.profile) : "";
     if (profileUrl) { prof.href = profileUrl; prof.textContent = "Your FOMO profile"; }
@@ -628,7 +804,9 @@
         const q = state.query.toLowerCase();
         const act = (state.activity || []).some((row) => activityHit(row, q));
         const bots = botSource(state.data).some((bot) => botHit(bot, q));
-        state.tab = (act || !bots) ? "activity" : "bots";
+        const pool = poolData(state.data).candidates.some((row) => poolHit(row, q)) || poolData(state.data).finals.some((row) => poolHit(row, q));
+        if (pool && !act) state.tab = "pool";
+        else state.tab = (act || !bots) ? "activity" : "bots";
       }
       if (state.cfg && (state.cfg.token || state.cfg.dataPath)) render();
     });
@@ -641,5 +819,6 @@
   if (state.cfg && (state.cfg.token || state.cfg.dataPath)) load();
   else render();
   setInterval(() => { if (state.cfg && (state.cfg.token || state.cfg.dataPath)) load(); }, 15000);
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js?v=4").catch(() => {});
+  setInterval(tickPoolCountdowns, 1000);
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js?v=5").catch(() => {});
 })();
